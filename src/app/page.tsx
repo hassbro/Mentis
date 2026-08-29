@@ -103,7 +103,7 @@ function GameContent() {
 
     if (data) {
       setBuzzerActive(data.active);
-      setBuzzerWinner(data.winner_team_id ? teams.find(t => t.id === data.winner_team_id) : null);
+      setBuzzerWinnerName(data.winner_team_id ? teams.find(t => t.id === data.winner_team_id) : null);
     }
   }
 
@@ -155,7 +155,7 @@ function GameContent() {
 
     if (!error) {
       setBuzzerActive(activate);
-      setBuzzerWinner(null);
+      setBuzzerWinnerName(null);
     }
   }
 
