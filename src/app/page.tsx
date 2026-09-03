@@ -94,6 +94,7 @@ function GameContent() {
   const [finalRoundId, setFinalRoundId] = useState<string | null>(null);
   const [finalSubs, setFinalSubs] = useState<any[]>([]); // live final_submissions rows
   const [revealEnabled, setRevealEnabled] = useState(false);
+  const [isQuestionVisible, setIsQuestionVisible] = useState(false); // <-- ADD THIS LINE
   const [countdown, setCountdown] = useState<number | null>(null); // seconds remaining
   const countdownTimerRef = useRef<number | null>(null);
 
@@ -176,6 +177,7 @@ function GameContent() {
           
           if (b.winner_team_id) {
             const { data: t } = await supabase.from('teams').select('name').eq('id', b.winner_team_id).maybeSingle();
+            setIsQuestionVisible(payload.new.is_question_visible ?? false);
             setBuzzerWinnerName(t?.name ?? null);
           } else {
             setBuzzerWinnerName(null);
@@ -200,7 +202,7 @@ function GameContent() {
     // ENSURE UNIQUE CATEGORY NAMES & SHUFFLE THEM FOR A FRESH BOARD ON REFRESH
     const seenNames = new Set<string>();
     const uniqueList = filtered.filter(c => {
-      const name = String(c.name || '').trim().toLowerCase();
+    const name = String(c.name || '').trim().toLowerCase();
       if (seenNames.has(name)) return false;
       seenNames.add(name);
       return true;
@@ -318,7 +320,7 @@ function GameContent() {
         final_round: finalRound,
         final_countdown_expires_at: null,
         active_question_id: finalQ ? finalQ.id : null,
-        question_revealed: false,
+        is_question_visible: false,
         answer_revealed: false
       });
 
@@ -373,18 +375,22 @@ function GameContent() {
 
   // host force reveal (or normal reveal when enabled)
   async function revealQuestionForFinal(force = false) {
-    if (!finalRoundId || (!revealEnabled && !force)) {
-      // not allowed unless forced
+    if (!force && (!finalRoundId || !revealEnabled)) {
       return;
     }
-    // set question_revealed and set countdown expiration timestamp (30s)
-    const expiresAt = new Date(Date.now() + 30_000).toISOString();
-    await supabase.from('game_state').update({
-      question_revealed: true,
-      final_countdown_expires_at: expiresAt
-    }).eq('id', 1);
 
-    // start local countdown UI
+    const expiresAt = new Date(Date.now() + 30_000).toISOString();
+    
+    const { data, error } = await supabase.from('game_state').update({
+      is_question_visible: true,
+      final_countdown_expires_at: expiresAt
+    }).eq('id', 1).select();
+
+    if (!error) {
+      // Instantly flip the local visibility state so the screen unlocks right away!
+      setIsQuestionVisible(true);
+    }
+
     startLocalCountdown(expiresAt);
   }
 
@@ -664,15 +670,18 @@ function GameContent() {
           {/* LEFT: question + controls */}
           <div className="flex-1 bg-[#15171a] rounded-xl p-8 border border-[#24292f]">
             <div className="mb-6">
-              <div className="text-xs text-slate-400 uppercase tracking-widest">Final Question</div>
-              {finalQuestion ? (
-                <div className="mt-4 bg-[#0f1720] border border-[#2a313a] rounded-lg p-8 text-left text-xl leading-relaxed">
-                  {finalQuestion.clue}
-                </div>
-              ) : (
-                <div className="mt-4 text-slate-400">No final question available</div>
-              )}
-            </div>
+  <div className="text-xs text-slate-400 uppercase tracking-widest">Final Question</div>
+  
+  {isQuestionVisible && finalQuestion ? (
+    <div className="mt-4 bg-[#0f1720] border border-[#2a313a] rounded-lg p-8 text-left text-xl leading-relaxed">
+      {finalQuestion.clue}
+    </div>
+  ) : (
+    <div className="mt-4 bg-[#0f1720] border border-[#2a313a] rounded-lg p-8 text-center text-slate-400 italic">
+      🔒 Final Question is hidden. Waiting for host to reveal...
+    </div>
+  )}
+</div>
 
             <div className="flex gap-3 mt-6">
               <button

@@ -133,7 +133,7 @@ export default function BuzzerPage() {
       console.debug('BUZZER: initial buzzers ->', b);
       if (b) {
         setBuzzerActive(!!b.active);
-        if (b.winner_team_id) {
+        if (b.active && b.winner_team_id) {
           const { data: t } = await supabase.from('teams').select('name').eq('id', b.winner_team_id).maybeSingle();
           setBuzzerWinner(t?.name ?? null);
         } else setBuzzerWinner(null);
@@ -169,13 +169,18 @@ export default function BuzzerPage() {
       if (!b) return;
       console.debug('BUZZER: buzzers event ->', b);
       setBuzzerActive(!!b.active);
+      
       if (b.active) {
         setHasBuzzed(false);
       }
+
+      // Show the winner whenever a winner_team_id is set in the database
       if (b.winner_team_id) {
         const { data: t } = await supabase.from('teams').select('name').eq('id', b.winner_team_id).maybeSingle();
         setBuzzerWinner(t?.name ?? null);
-      } else setBuzzerWinner(null);
+      } else {
+        setBuzzerWinner(null); // Clears automatically when the host resets/clears the winner!
+      }
     });
     safeSubscribe(bzCh);
     subsRef.current.push(bzCh);
@@ -257,7 +262,9 @@ export default function BuzzerPage() {
 
   // handle buzz
   async function handleBuzz() {
-    if (!teamId || !buzzerActive || hasBuzzed || !!buzzerWinner) return;
+    // Remove !!buzzerWinner from here so it doesn't permanently lock out new buzzes
+    if (!teamId || !buzzerActive || hasBuzzed) return;
+    
     setHasBuzzed(true);
     const res = await supabase.from('buzzers').update({ active: false, winner_team_id: teamId }).eq('id', 1);
     console.debug('buzz write ->', res);
