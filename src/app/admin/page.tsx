@@ -404,7 +404,7 @@ export default function AdminPage() {
           answer: '',
           is_correct: null
         }));
-        const subsUpsert = await supabase.from('final_submissions').upsert(payload, { onConflict: ['team_id', 'final_round'] });
+        const subsUpsert = await supabase.from('final_submissions').upsert(payload, { onConflict: ['team_id', 'final_round'] as any });
         console.debug('startFinal final_submissions upsert ->', subsUpsert);
         if (subsUpsert.error) console.error('startFinal final_submissions upsert error', subsUpsert.error);
       }

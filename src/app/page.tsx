@@ -308,7 +308,7 @@ function GameContent() {
           answer: null,
           is_correct: null
         }));
-        await supabase.from('final_submissions').upsert(payload, { onConflict: ['team_id', 'final_round'] });
+        await supabase.from('final_submissions').upsert(payload, { onConflict: ['team_id', 'final_round'] as any });
       }
 
       // publish game_state final flags (do not reveal question yet)

@@ -209,8 +209,10 @@ export default function BuzzerPage() {
     const ch = createChannel(`team_score_${teamId}_${Date.now()}`);
     ch.on('postgres_changes', { event: '*', schema: 'public', table: 'teams', filter: `id=eq.${teamId}` }, payload => {
       if (!payload.new) return;
-      setTeamScore(payload.new.score ?? 0);
-      if (payload.new.approved) {
+    if (!payload.new) return;
+      const newData = payload.new as any;
+      setTeamScore(newData.score ?? 0);
+      if (newData.approved) {
         setWaitingApproval(false);
         setIsApproved(true);
         stopApprovalPoll();
@@ -240,16 +242,16 @@ export default function BuzzerPage() {
   // submit wager / answer (final)
   async function submitWager(value: number | null) {
     if (!teamId || !finalRound) { alert('Final not active'); return; }
-    const payload = { team_id: teamId, final_round: finalRound, wager: value ?? 0, submitted_wager_at: value !== null ? new Date().toISOString() : null };
-    const res = await supabase.from('final_submissions').upsert(payload, { onConflict: ['team_id', 'final_round'] });
+    const payload = { team_id: teamId as any, final_round: finalRound as any, wager: value ?? 0, submitted_wager_at: value !== null ? new Date().toISOString() : null };
+    const res = await supabase.from('final_submissions').upsert(payload, { onConflict: ['team_id', 'final_round'] as any });
     console.debug('submitWager ->', res);
     if (!res.error) { /* local update not required, subscription will pick up */ }
   }
 
   async function submitAnswer(text: string | null) {
     if (!teamId || !finalRound) { alert('Final not active'); return; }
-    const payload = { team_id: teamId, final_round: finalRound, answer: text ?? '', submitted_answer_at: text ? new Date().toISOString() : null };
-    const res = await supabase.from('final_submissions').upsert(payload, { onConflict: ['team_id', 'final_round'] });
+    const payload = { team_id: teamId as any, final_round: finalRound as any, answer: text ?? '', submitted_answer_at: text ? new Date().toISOString() : null };
+    const res = await supabase.from('final_submissions').upsert(payload, { onConflict: ['team_id', 'final_round']as any });
     console.debug('submitAnswer ->', res);
   }
 
