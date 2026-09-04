@@ -8,6 +8,8 @@ export default function BuzzerPage() {
   const [teamId, setTeamId] = useState<number | null>(null);
   const [waitingApproval, setWaitingApproval] = useState(false);
   const [isApproved, setIsApproved] = useState(false);
+  const [countdownValue, setCountdownValue] = useState<number | null>(null);
+  const [showTimeUpModal, setShowTimeUpModal] = useState(false);
 
   // authoritative fields
   const [rawMode, setRawMode] = useState<string | null>(null);
@@ -69,20 +71,30 @@ export default function BuzzerPage() {
   // --- end helpers ---
 
   function startLocalCountdown(expiresAtIso: string | null) {
-    if (!expiresAtIso) {
-      if (countdownRef.current) { window.clearInterval(countdownRef.current); countdownRef.current = null; }
-      return;
-    }
-    const end = new Date(expiresAtIso).getTime();
+  if (!expiresAtIso) {
     if (countdownRef.current) { window.clearInterval(countdownRef.current); countdownRef.current = null; }
-    const tick = () => {
-      const remaining = Math.max(0, Math.ceil((end - Date.now()) / 1000));
-      // not storing countdown state to minimize complexity; host shows it
-      if (remaining <= 0 && countdownRef.current) { window.clearInterval(countdownRef.current); countdownRef.current = null; }
-    };
-    tick();
-    countdownRef.current = window.setInterval(tick, 250);
+    setCountdownValue(null);
+    return;
   }
+  
+  const end = new Date(expiresAtIso).getTime();
+  if (countdownRef.current) { window.clearInterval(countdownRef.current); countdownRef.current = null; }
+  
+  const tick = () => {
+    const remaining = Math.max(0, Math.ceil((end - Date.now()) / 1000));
+    
+    // 👉 Store the state so the client screen re-renders with the ticking numbers
+    setCountdownValue(remaining);
+    
+    if (remaining <= 0 && countdownRef.current) { 
+      window.clearInterval(countdownRef.current); 
+      countdownRef.current = null; 
+    }
+  };
+  
+  tick();
+  countdownRef.current = window.setInterval(tick, 250);
+}
 
   // load question by id (shared)
   async function loadQuestionById(qId: number | null) {
@@ -256,11 +268,24 @@ export default function BuzzerPage() {
   }
 
   async function submitAnswer(text: string | null) {
-    if (!teamId || !finalRound) { alert('Final not active'); return; }
-    const payload = { team_id: teamId as any, final_round: finalRound as any, answer: text ?? '', submitted_answer_at: text ? new Date().toISOString() : null };
-    const res = await supabase.from('final_submissions').upsert(payload, { onConflict: ['team_id', 'final_round']as any });
-    console.debug('submitAnswer ->', res);
+  // 🛑 Prevent submission if the countdown has hit 0
+  if (countdownValue === 0) {
+    setShowTimeUpModal(true); // Replaces the browser alert with your custom modal
+    return;
   }
+
+  if (!teamId || !finalRound) { alert('Final not active'); return; }
+  
+  const payload = { 
+    team_id: teamId as any, 
+    final_round: finalRound as any, 
+    answer: text ?? '', 
+    submitted_answer_at: text ? new Date().toISOString() : null 
+  };
+  
+  const res = await supabase.from('final_submissions').upsert(payload, { onConflict: ['team_id', 'final_round'] as any });
+  console.debug('submitAnswer ->', res);
+}
 
   // handle buzz
   async function handleBuzz() {
@@ -326,6 +351,8 @@ export default function BuzzerPage() {
   </div>
 </div>
 
+
+
 <div className="bg-[#0d1117] border border-[#21262d] p-3.5 rounded-2xl">
   <div className="text-[10px] uppercase text-slate-400">Final Answer</div>
   <div className="mt-2 flex gap-2">
@@ -340,10 +367,33 @@ export default function BuzzerPage() {
   </div>
 </div>
 
+{/* 👉 SMALL COUNTDOWN TIMER DROPPED RIGHT HERE */}
+        {countdownValue !== null && countdownValue > 0 && (
+          <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl py-2 px-4 flex items-center justify-between animate-pulse">
+            <span className="text-[10px] text-amber-400 font-bold uppercase tracking-wider">Time Remaining</span>
+            <span className="text-sm font-black font-mono text-amber-300">00:{countdownValue < 10 ? `0${countdownValue}` : countdownValue}</span>
+          </div>
+        )}
+
                 <div className="bg-[#0f1720] border border-[#2a313a] rounded-lg p-4 text-left text-sm text-slate-200">
                   <div className="text-[10px] text-slate-400 uppercase">Final Clue</div>
                   <div className="mt-2">{finalQ?.clue ?? 'Waiting for host'}</div>
                 </div>
+
+                {showTimeUpModal && (
+  <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+    <div className="bg-[#161b22] border border-[#30363d] rounded-2xl p-6 max-w-sm w-full space-y-4 shadow-2xl text-center">
+      <div className="text-amber-400 font-bold text-lg">Time's Up!</div>
+      <p className="text-slate-300 text-sm">The countdown has expired. Submissions are now closed.</p>
+      <button 
+        onClick={() => setShowTimeUpModal(false)}
+        className="w-full py-2 bg-[#60A5FA] hover:bg-blue-400 text-[#0d1117] font-bold rounded-xl transition-all"
+      >
+        Got it
+      </button>
+    </div>
+  </div>
+)}
 
                 {(finalQ && showAnswer) && (
                   <div className="bg-[#0f1720] border border-[#2a313a] rounded-lg p-4 text-left text-sm text-amber-200 font-black mt-2">
