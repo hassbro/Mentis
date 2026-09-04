@@ -185,7 +185,7 @@ export default function CastPage() {
                 </div>
               </div>
             </div>
-          ) : isQuestionVisible && activeQuestion ? (
+          ) : isQuestionVisible && activeQuestion && gameState?.mode !== 'final' && !gameState?.final_started ? (
             <div className="w-full bg-slate-900/90 border border-slate-700 rounded-3xl p-12 shadow-2xl text-center space-y-6">
               <div className="text-amber-400 font-bold text-sm uppercase tracking-widest">Active Clue ({activeQuestion.points} Points)</div>
               <div className="text-3xl font-extrabold text-slate-100 leading-relaxed">{activeQuestion.clue}</div>

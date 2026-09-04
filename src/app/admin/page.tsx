@@ -35,6 +35,8 @@ export default function AdminPage() {
   const [teams, setTeams] = useState<any[]>([]);
   const [newTeamName, setNewTeamName] = useState('');
 
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
+
   // Game / rounds
   const [gameMode, setGameMode] = useState<'buzzer' | 'turn' | 'unknown'>('unknown');
   const [buzzerOpen, setBuzzerOpen] = useState(false);
@@ -353,12 +355,26 @@ export default function AdminPage() {
   }
 
   // --- Reset game (full) ---
-  async function handleResetGame() {
-    if (!confirm('Reset the entire game and remove all teams?')) return;
-    await supabase.from('teams').delete();
+  // 1. Triggered by the reset button to open the custom modal tile
+  function handleResetGame() {
+    setShowResetConfirm(true);
+  }
+
+  // 2. Triggered by the "Yes, Reset Game" button inside the modal tile
+  async function confirmAndExecuteReset() {
+    setShowResetConfirm(false);
+
+    // Clear dependent records first to satisfy foreign key constraints
+    await supabase.from('final_submissions').delete().neq('id', 0);
+    
+    // Add a filter condition so Supabase permits the team deletion
+    await supabase.from('teams').delete().neq('id', 0);
+    
+    // State, question, and buzzer resets
     await supabase.from('game_state').update({ game_started: false, buzzer_open: false, active_round: 1, current_turn_team_id: null, turn_history: [] }).eq('id', 1);
     await supabase.from('questions').update({ is_answered: false }).neq('id', 0);
     await supabase.from('buzzers').update({ active: false, winner_team_id: null }).eq('id', 1);
+    
     setPendingTeam(null);
     await fetchTeams();
     showNotification('Game reset', 'success');
@@ -415,7 +431,7 @@ export default function AdminPage() {
         final_started: true,
         final_round: finalRound,
         final_countdown_expires_at: null,
-        active_question_id: finalQ ? finalQ.id : null,
+        active_question_id: null, // <--- Keep this null so it doesn't trigger standard question popups!
         question_revealed: false,
         answer_revealed: false,
         mode: 'final'
@@ -729,6 +745,40 @@ export default function AdminPage() {
             </div>
           </div>
         )}
+
+        {showResetConfirm && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4 z-50 animate-fade-in">
+          <div className="bg-[#222733] border-2 border-rose-500/30 max-w-md w-full p-6 rounded-3xl shadow-2xl text-center space-y-5">
+            <div className="w-12 h-12 bg-rose-500/10 text-rose-400 rounded-full flex items-center justify-center mx-auto text-xl font-bold border border-rose-500/20">
+              ⚠️
+            </div>
+            
+            <div className="space-y-2">
+              <h3 className="text-xl font-extrabold text-slate-100">Reset Entire Game?</h3>
+              <p className="text-xs text-slate-400 leading-relaxed">
+                This will completely wipe all registered teams, reset scores, clear submissions, and restart the board. This action cannot be undone.
+              </p>
+            </div>
+
+            <div className="flex gap-3 pt-2">
+              <button 
+                onClick={() => setShowResetConfirm(false)}
+                className="flex-1 py-3 bg-[#181c25] hover:bg-[#1b202a] border border-[#2f3748] text-slate-300 font-bold rounded-xl text-xs transition-all"
+              >
+                Cancel
+              </button>
+              
+              {/* 👉 IT GOES RIGHT HERE AS THE CONFIRMATION BUTTON */}
+              <button 
+                onClick={confirmAndExecuteReset}
+                className="flex-1 py-3 bg-rose-600 hover:bg-rose-500 text-white font-extrabold rounded-xl text-xs transition-all shadow-lg shadow-rose-600/20"
+              >
+                Confirm Reset
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       </div>
     </main>
   );

@@ -56,11 +56,11 @@ function MentisLogo({ isDJ, isFinal }: { isDJ: boolean; isFinal: boolean }) {
 export default function Page() {
   return (
     <Suspense fallback={
-      <div className="min-h-screen bg-[#181c25] text-slate-100 flex items-center justify-center">
+      <main className="min-h-screen bg-[#181c25] text-slate-100 flex items-center justify-center">
         <div className="flex items-center gap-3 text-slate-300 font-medium text-lg animate-pulse">
           <RefreshCw className="w-5 h-5 animate-spin" /> Loading MENTIS...
         </div>
-      </div>
+      </main>
     }>
       <GameContent />
     </Suspense>
@@ -68,8 +68,14 @@ export default function Page() {
 }
 
 function GameContent() {
-  const searchParams = useSearchParams();
-  const roundParam = searchParams.get('round');
+  const [roundParam, setRoundParam] = useState<string | null>(null);
+  const [gameEnded, setGameEnded] = useState(false);
+  const [winnerDetails, setWinnerDetails] = useState<{ name: string; score: number } | null>(null);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    setRoundParam(params.get('round'));
+  }, []);
 
   // board state
   const [categories, setCategories] = useState<any[]>([]);
@@ -94,9 +100,10 @@ function GameContent() {
   const [finalRoundId, setFinalRoundId] = useState<string | null>(null);
   const [finalSubs, setFinalSubs] = useState<any[]>([]); // live final_submissions rows
   const [revealEnabled, setRevealEnabled] = useState(false);
-  const [isQuestionVisible, setIsQuestionVisible] = useState(false); // <-- ADD THIS LINE
+  const [isQuestionVisible, setIsQuestionVisible] = useState(false);
   const [countdown, setCountdown] = useState<number | null>(null); // seconds remaining
   const countdownTimerRef = useRef<number | null>(null);
+  const [chosenCorrectTeamIds, setChosenCorrectTeamIds] = useState<number[]>([]);
 
   // teams & side
   const [teams, setTeams] = useState<any[]>([]);
@@ -113,7 +120,7 @@ function GameContent() {
   const finalSubsChannelRef = useRef<any | null>(null);
   const gameStateChannelRef = useRef<any | null>(null);
 
-  // --- Channel helpers (local, minimal) ---
+  // --- Channel helpers ---
   function createChannel(name: string) {
     return supabase.channel(name);
   }
@@ -148,9 +155,7 @@ function GameContent() {
       console.warn('safeRemoveChannel error', err);
     }
   }
-  // --- end helpers ---
 
-  // --- helpers: fetch teams, board ---
   async function fetchTeams() {
     const { data } = await supabase.from('teams').select('*').eq('approved', true).order('score', { ascending: false });
     if (data) setTeams(data);
@@ -161,7 +166,6 @@ function GameContent() {
     const targetRound = (roundParam === 'double_jeopardy' || roundParam === 'final') ? roundParam : 'jeopardy';
     if (targetRound === 'final') startFinalMentis();
     else { setRound(targetRound as any); fetchGameData(targetRound as any); }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roundParam]);
 
   // Real-time listener for who buzzed first
@@ -191,24 +195,78 @@ function GameContent() {
     };
   }, []);
 
+  // Subscribe to game_state to track reveal timestamps and final round changes
+  useEffect(() => {
+    (async () => {
+      const { data } = await supabase.from('game_state').select('*').maybeSingle();
+      if (data) {
+        setGameMode((data.mode as any) ?? 'unknown');
+        setCurrentTurnTeamId(data.current_turn_team_id ?? null);
+
+        if (data.final_started && data.final_round) {
+          setFinalRoundId(data.final_round);
+          loadFinalSubmissions(data.final_round);
+          subscribeFinalSubmissions(data.final_round);
+        } else {
+          setFinalRoundId(null);
+        }
+
+        if (data.final_countdown_expires_at) {
+          startLocalCountdown(data.final_countdown_expires_at);
+        }
+      }
+    })();
+
+    const ch = createChannel('host_game_state_sub');
+    ch.on('postgres_changes', { event: '*', schema: 'public', table: 'game_state' }, async (payload: any) => {
+      if (!payload.new) return;
+      const gs = payload.new;
+      setGameMode((gs.mode as any) ?? 'unknown');
+      setCurrentTurnTeamId(gs.current_turn_team_id ?? null);
+
+      if (gs.final_started && gs.final_round) {
+        setFinalRoundId(gs.final_round);
+        await loadFinalSubmissions(gs.final_round);
+        subscribeFinalSubmissions(gs.final_round);
+      } else {
+        setFinalRoundId(null);
+        setFinalSubs([]);
+      }
+
+      if (gs.final_countdown_expires_at) {
+        startLocalCountdown(gs.final_countdown_expires_at);
+      } else {
+        setCountdown(null);
+        if (countdownTimerRef.current) { window.clearInterval(countdownTimerRef.current); countdownTimerRef.current = null; }
+      }
+
+      setShowAnswer(!!gs.answer_revealed);
+    });
+
+    safeSubscribe(ch);
+    gameStateChannelRef.current = ch;
+
+    return () => {
+      safeRemoveChannel(gameStateChannelRef.current);
+      gameStateChannelRef.current = null;
+    };
+  }, [teams]);
+
   async function fetchGameData(currentRound: 'jeopardy' | 'double_jeopardy') {
     setLoading(true);
     const { data: catData } = await supabase.from('categories').select('*');
     if (!catData) { setLoading(false); return; }
     
-    // Filter out final categories
     const filtered = catData.filter(c => !(String(c.name || '').toLowerCase().includes('final')));
     
-    // ENSURE UNIQUE CATEGORY NAMES & SHUFFLE THEM FOR A FRESH BOARD ON REFRESH
     const seenNames = new Set<string>();
     const uniqueList = filtered.filter(c => {
-    const name = String(c.name || '').trim().toLowerCase();
+      const name = String(c.name || '').trim().toLowerCase();
       if (seenNames.has(name)) return false;
       seenNames.add(name);
       return true;
     });
 
-    // Shuffle uniquely so refreshing generates a different set of categories
     const shuffledCats = [...uniqueList].sort(() => Math.random() - 0.5);
     const uniqueCats = shuffledCats.slice(0, 5);
     setCategories(uniqueCats);
@@ -254,23 +312,17 @@ function GameContent() {
     setLoading(false);
   }
 
-  // --- final flow helpers ---
-
-  // create final_round id and create blank submission rows for approved teams
   async function startFinalMentis() {
     setLoading(true);
     try {
-      // Find all final categories
       const { data: finalCats } = await supabase.from('categories').select('id').ilike('name', '%final%');
       let finalQ = null;
 
       if (finalCats && finalCats.length > 0) {
         const catIds = finalCats.map((c: any) => c.id);
-        // Fetch all questions for final categories instead of just limiting to 1
         const { data: qList } = await supabase.from('questions').select('*').in('category_id', catIds);
         
         if (qList && qList.length > 0) {
-          // SHUFFLE and pick a random one for a fresh final question every time!
           const shuffledFinals = [...qList].sort(() => Math.random() - 0.5);
           finalQ = shuffledFinals[0];
         }
@@ -292,17 +344,14 @@ function GameContent() {
         }
       }
 
-      // create unique final_round id
       const finalRound = new Date().toISOString();
       setFinalRoundId(finalRound);
       setFinalQuestion(finalQ ?? null);
       setActiveQuestion(finalQ ?? null);
       setShowAnswer(false);
 
-      // insert empty final_submissions rows for all approved teams (wager/answer null)
       const { data: approved } = await supabase.from('teams').select('id').eq('approved', true);
       if (approved && approved.length > 0) {
-        // upsert rows (unique constraint on team_id, final_round)
         const payload = approved.map((t: any) => ({
           team_id: t.id,
           final_round: finalRound,
@@ -313,7 +362,6 @@ function GameContent() {
         await supabase.from('final_submissions').upsert(payload, { onConflict: ['team_id', 'final_round'] as any });
       }
 
-      // publish game_state final flags (do not reveal question yet)
       await supabase.from('game_state').upsert({
         id: 1,
         final_started: true,
@@ -324,7 +372,6 @@ function GameContent() {
         answer_revealed: false
       });
 
-      // load live submissions
       await loadFinalSubmissions(finalRound);
       subscribeFinalSubmissions(finalRound);
     } catch (err) {
@@ -342,15 +389,12 @@ function GameContent() {
   }
 
   function evaluateRevealEnabled(subs: any[]) {
-    // reveal enabled when every approved team has a non-null wager
     const approvedTeamIds = new Set(teams.map(t => t.id));
     const entriesCount = subs.filter(s => s && s.wager !== null && approvedTeamIds.has(s.team_id)).length;
     setRevealEnabled(entriesCount >= teams.length && teams.length > 0);
   }
 
-  // Subscribe to final submissions for a given finalRound (attach handlers before subscribing)
   function subscribeFinalSubmissions(finalRound: string | null) {
-    // clean up existing channel if present
     if (finalSubsChannelRef.current) {
       try { safeRemoveChannel(finalSubsChannelRef.current); } catch (e) { /* ignore */ }
       finalSubsChannelRef.current = null;
@@ -368,12 +412,10 @@ function GameContent() {
       }
     );
 
-    // subscribe and store the channel object for cleanup
     safeSubscribe(ch);
     finalSubsChannelRef.current = ch;
   }
 
-  // host force reveal (or normal reveal when enabled)
   async function revealQuestionForFinal(force = false) {
     if (!force && (!finalRoundId || !revealEnabled)) {
       return;
@@ -381,13 +423,12 @@ function GameContent() {
 
     const expiresAt = new Date(Date.now() + 30_000).toISOString();
     
-    const { data, error } = await supabase.from('game_state').update({
+    const { error } = await supabase.from('game_state').update({
       is_question_visible: true,
       final_countdown_expires_at: expiresAt
-    }).eq('id', 1).select();
+    }).eq('id', 1);
 
     if (!error) {
-      // Instantly flip the local visibility state so the screen unlocks right away!
       setIsQuestionVisible(true);
     }
 
@@ -413,125 +454,62 @@ function GameContent() {
     countdownTimerRef.current = window.setInterval(tick, 250);
   }
 
-  // host reveals final answer (shows correct answer text)
   async function revealFinalAnswer() {
     await supabase.from('game_state').update({ answer_revealed: true }).eq('id', 1);
     setShowAnswer(true);
   }
 
-  // host calculates final results:
-  // - host marks is_correct per final_submissions rows via local state (we will store chosenCorrectIds)
-  // - Calculate applies wagers to teams: +wager if correct else -wager
+  // FIXED & COMPLETED calculateFinalResults logic
   async function calculateFinalResults(chosenCorrectTeamIds: number[]) {
     if (!finalRoundId) return;
-    // load submissions for this final
+    
     const { data: subs } = await supabase.from('final_submissions').select('*').eq('final_round', finalRoundId);
     if (!subs) return;
 
-    // build score updates
-    const updates: { id: number; newScore: number }[] = [];
+    let updatedTeamsList = [...teams];
+
     for (const team of teams) {
       const sub = subs.find((s: any) => s.team_id === team.id);
       const wager = (sub && sub.wager) ? Number(sub.wager) : 0;
       const isCorrect = chosenCorrectTeamIds.includes(team.id);
       const newScore = isCorrect ? team.score + wager : team.score - wager;
-      updates.push({ id: team.id, newScore });
-      // update final_submissions row is_correct
+      
+      await supabase.from('teams').update({ score: newScore }).eq('id', team.id);
+      
       await supabase.from('final_submissions').update({
         is_correct: isCorrect
       }).match({ team_id: team.id, final_round: finalRoundId });
+
+      // Update local array for immediate winner calculation
+      const target = updatedTeamsList.find(t => t.id === team.id);
+      if (target) target.score = newScore;
     }
 
-    // batch update teams (sequential for clarity)
-    for (const u of updates) {
-      await supabase.from('teams').update({ score: u.newScore }).eq('id', u.id);
-    }
+    // Sort teams to find the highest score
+    updatedTeamsList.sort((a, b) => b.score - a.score);
+    const topWinner = updatedTeamsList[0] || null;
 
-    // publish winners and clear final flags in game_state
-    const winnerIds = chosenCorrectTeamIds;
+    // End final round state in database
     await supabase.from('game_state').update({
       final_started: false,
       final_round: null,
       final_countdown_expires_at: null,
       active_question_id: null,
-      question_revealed: false,
-      answer_revealed: false,
-      final_winner_ids: winnerIds
+      is_question_visible: false,
+      answer_revealed: false
     }).eq('id', 1);
 
-    // refresh local teams and final subs
-    await fetchTeams();
-    setFinalSubs([]);
     setFinalRoundId(null);
     setFinalQuestion(null);
-    setShowAnswer(false);
-    setCountdown(null);
-    if (countdownTimerRef.current) { window.clearInterval(countdownTimerRef.current); countdownTimerRef.current = null; }
+    setActiveQuestion(null);
+    setTeams(updatedTeamsList);
+    
+    if (topWinner) {
+      setWinnerDetails({ name: topWinner.name, score: topWinner.score });
+    }
+    setGameEnded(true); // <--- Triggers the dedicated winner leaderboard view
   }
 
-  // subscribe to game_state to track reveal timestamps and final round changes
-  useEffect(() => {
-    (async () => {
-      const { data } = await supabase.from('game_state').select('*').maybeSingle();
-      if (data) {
-        setGameMode((data.mode as any) ?? 'unknown');
-        setCurrentTurnTeamId(data.current_turn_team_id ?? null);
-
-        if (data.final_started && data.final_round) {
-          setFinalRoundId(data.final_round);
-          // load submissions
-          loadFinalSubmissions(data.final_round);
-          subscribeFinalSubmissions(data.final_round);
-        } else {
-          setFinalRoundId(null);
-        }
-
-        // if countdown exists, start local countdown
-        if (data.final_countdown_expires_at) {
-          startLocalCountdown(data.final_countdown_expires_at);
-        }
-      }
-    })();
-
-    // create channel, attach handlers, then subscribe; store channel object for cleanup
-    const ch = createChannel('host_game_state_sub');
-    ch.on('postgres_changes', { event: '*', schema: 'public', table: 'game_state' }, async (payload: any) => {
-      if (!payload.new) return;
-      const gs = payload.new;
-      setGameMode((gs.mode as any) ?? 'unknown');
-      setCurrentTurnTeamId(gs.current_turn_team_id ?? null);
-
-      if (gs.final_started && gs.final_round) {
-        setFinalRoundId(gs.final_round);
-        await loadFinalSubmissions(gs.final_round);
-        subscribeFinalSubmissions(gs.final_round);
-      } else {
-        setFinalRoundId(null);
-        setFinalSubs([]);
-      }
-
-      if (gs.final_countdown_expires_at) {
-        startLocalCountdown(gs.final_countdown_expires_at);
-      } else {
-        setCountdown(null);
-        if (countdownTimerRef.current) { window.clearInterval(countdownTimerRef.current); countdownTimerRef.current = null; }
-      }
-
-      // if answer_revealed updated, reflect locally
-      setShowAnswer(!!gs.answer_revealed);
-    });
-
-    safeSubscribe(ch);
-    gameStateChannelRef.current = ch;
-
-    return () => {
-      safeRemoveChannel(gameStateChannelRef.current);
-      gameStateChannelRef.current = null;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [teams]);
-
-  // --- existing question handling (non-final) ---
   async function handleCellClick(question: any) {
     if (!question || answeredQuestions[question.id]) return;
 
@@ -565,7 +543,6 @@ function GameContent() {
     setShowAnswer(true);
   }
 
-  // turn helper
   async function setNextTurnInDB() {
     try {
       const { count: unanswered } = await supabase.from('questions').select('*', { head: true, count: 'exact' }).eq('is_answered', false);
@@ -603,7 +580,6 @@ function GameContent() {
     const isDD = dailyDoubles.has(activeQuestion.id);
     const pointsToUse = isDD ? (parseInt(wagerAmount) || 0) : activeQuestion.points;
 
-    // authoritative scoring team
     const { data: gs } = await supabase.from('game_state').select('current_turn_team_id').maybeSingle();
     const scoringTeamId = gs?.current_turn_team_id ?? (teams[activeTeamIndex] && teams[activeTeamIndex].id);
     const scoringTeam = teams.find(t => t.id === scoringTeamId) ?? teams[activeTeamIndex];
@@ -614,7 +590,6 @@ function GameContent() {
       await fetchTeams();
     }
 
-    // Clear active question in DB so clients clear
     try {
       await supabase.from('game_state').update({
         active_question_id: null,
@@ -625,7 +600,6 @@ function GameContent() {
       console.error('Failed to clear active question in game_state', e);
     }
 
-    // Advance turn if in turn mode
     if (gameMode === 'turn') {
       await setNextTurnInDB();
     }
@@ -638,12 +612,84 @@ function GameContent() {
     setWagerError('');
   }
 
-  // --- rendering (final vs non-final) ---
   if (loading) {
     return (
       <main className="min-h-screen bg-[#181c25] text-slate-100 flex items-center justify-center">
         <div className="flex items-center gap-3 text-slate-300 font-medium text-lg animate-pulse">
           <RefreshCw className="w-5 h-5 animate-spin" /> Loading MENTIS...
+        </div>
+      </main>
+    );
+  }
+
+  // --- WINNER / FINAL LEADERBOARD SCREEN ---
+  if (gameEnded) {
+    return (
+      <main className="min-h-screen bg-[#181c25] text-slate-100 flex flex-col items-center justify-center p-6">
+        <div className="max-w-xl w-full bg-[#222733] border border-[#2f3748] rounded-3xl p-8 shadow-2xl text-center space-y-6">
+          <MentisLogo isDJ={false} isFinal={true} />
+
+          {winnerDetails && (
+            <div className="bg-gradient-to-r from-amber-500/20 via-amber-400/30 to-amber-500/20 border border-amber-400/40 rounded-2xl p-6 shadow-inner">
+              <div className="flex items-center justify-center gap-2 text-amber-300 text-sm font-bold uppercase tracking-widest mb-1">
+                <Trophy className="w-5 h-5 text-amber-400 animate-bounce" /> Grand Champion <Trophy className="w-5 h-5 text-amber-400 animate-bounce" />
+              </div>
+              <div className="text-4xl font-black text-amber-200 tracking-wide mt-2">
+                {winnerDetails.name.toUpperCase()}
+              </div>
+              <div className="text-xs text-slate-400 mt-1">Final Score: {winnerDetails.score} points</div>
+            </div>
+          )}
+
+          <div className="space-y-3 text-left">
+            <div className="text-xs uppercase text-slate-400 font-bold tracking-wider px-1">Final Standings</div>
+            <div className="space-y-2 max-h-[300px] overflow-y-auto pr-1">
+              {teams.map((team, index) => (
+                <div key={team.id} className="p-4 rounded-xl bg-[#1b202a] border border-[#293244] flex justify-between items-center">
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs font-black text-slate-500">#{index + 1}</span>
+                    <span className="font-bold text-sm text-slate-200">{team.name}</span>
+                  </div>
+                  <span className="font-black text-lg text-amber-300">{team.score}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <button 
+            onClick={async () => {
+              // 1. Clear any dependent/related records first (prevents foreign key errors)
+              await supabase.from('final_submissions').delete().neq('id', 0);
+              
+              // 2. Completely delete all teams from the database
+              await supabase.from('teams').delete().neq('id', -999999); 
+              
+              // 3. Reset game state back to default
+              await supabase.from('game_state').update({
+                final_started: false,
+                final_round: null,
+                active_question_id: null,
+                is_question_visible: false,
+                answer_revealed: false
+              }).eq('id', 1);
+
+              // 4. Reset local UI states
+              setGameEnded(false);
+              setWinnerDetails(null);
+              setShowAnswer(false);
+              setIsDailyDoubleScreen(false);
+              setWagerAmount('');
+              setWagerError('');
+              setRound('jeopardy');
+              
+              // 5. Refresh data
+              fetchTeams();
+              fetchGameData('jeopardy');
+            }} 
+            className="w-full py-3 bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold rounded-xl text-sm transition-all shadow-lg"
+          >
+            Return to Board / New Game
+          </button>
         </div>
       </main>
     );
@@ -658,7 +704,7 @@ function GameContent() {
   if (isFinal) {
     return (
       <main className={`min-h-screen ${bgMain} text-slate-100 p-6`}>
-        <div className="max-w-[1400px] mx-auto w-full mb-6 pb-4 border-b ${borderColor} flex items-center justify-between">
+        <div className="max-w-[1400px] mx-auto w-full mb-6 pb-4 border-b border-[#2f3748] flex items-center justify-between">
           <MentisLogo isDJ={isDJ} isFinal={true} />
           <div className="flex items-center gap-3">
             <button onClick={() => startFinalMentis()} className="bg-[#222733] px-4 py-2 rounded-xl text-xs">Start / Reload Final</button>
@@ -670,18 +716,18 @@ function GameContent() {
           {/* LEFT: question + controls */}
           <div className="flex-1 bg-[#15171a] rounded-xl p-8 border border-[#24292f]">
             <div className="mb-6">
-  <div className="text-xs text-slate-400 uppercase tracking-widest">Final Question</div>
-  
-  {isQuestionVisible && finalQuestion ? (
-    <div className="mt-4 bg-[#0f1720] border border-[#2a313a] rounded-lg p-8 text-left text-xl leading-relaxed">
-      {finalQuestion.clue}
-    </div>
-  ) : (
-    <div className="mt-4 bg-[#0f1720] border border-[#2a313a] rounded-lg p-8 text-center text-slate-400 italic">
-      🔒 Final Question is hidden. Waiting for host to reveal...
-    </div>
-  )}
-</div>
+              <div className="text-xs text-slate-400 uppercase tracking-widest">Final Question</div>
+              
+              {isQuestionVisible && finalQuestion ? (
+                <div className="mt-4 bg-[#0f1720] border border-[#2a313a] rounded-lg p-8 text-left text-xl leading-relaxed">
+                  {finalQuestion.clue}
+                </div>
+              ) : (
+                <div className="mt-4 bg-[#0f1720] border border-[#2a313a] rounded-lg p-8 text-center text-slate-400 italic">
+                  🔒 Final Question is hidden. Waiting for host to reveal...
+                </div>
+              )}
+            </div>
 
             <div className="flex gap-3 mt-6">
               <button
@@ -700,7 +746,9 @@ function GameContent() {
               </button>
 
               <button onClick={revealFinalAnswer} className="px-4 py-2 rounded-md bg-emerald-500 text-white">Reveal Answer</button>
-              <button onClick={() => calculateFinalResults([])} className="px-4 py-2 rounded-md bg-rose-600 text-white">End Final</button>
+              <button onClick={() => calculateFinalResults(chosenCorrectTeamIds)} className="px-4 py-2 rounded-md bg-rose-600 text-white">
+                Calculate Scores & End Final
+              </button>            
             </div>
 
             <div className="mt-6">
@@ -727,6 +775,8 @@ function GameContent() {
               {finalSubs.length === 0 ? <div className="text-xs text-slate-400">Waiting for teams to join / submit wagers</div> :
                 finalSubs.map((s: any) => {
                   const team = teams.find(t => t.id === s.team_id) ?? { name: `Team ${s.team_id}` };
+                  const isChecked = chosenCorrectTeamIds.includes(team.id);
+
                   return (
                     <div key={s.team_id} className="p-3 bg-[#15191d] rounded-lg border border-[#2a313a]">
                       <div className="flex justify-between items-center">
@@ -746,12 +796,18 @@ function GameContent() {
                         </div>
 
                         <div className="col-span-2 mt-2 flex items-center gap-2">
-                          <label className="flex items-center gap-2 text-xs">
-                            <input type="checkbox" defaultChecked={!!s.is_correct} onChange={async (e) => {
-                              const newVal = e.currentTarget.checked;
-                              await supabase.from('final_submissions').update({ is_correct: newVal }).match({ team_id: s.team_id, final_round: finalRoundId });
-                              await loadFinalSubmissions(finalRoundId);
-                            }} />
+                          <label className="flex items-center gap-2 text-xs cursor-pointer select-none">
+                            <input 
+                              type="checkbox" 
+                              checked={isChecked}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setChosenCorrectTeamIds([...chosenCorrectTeamIds, team.id]);
+                                } else {
+                                  setChosenCorrectTeamIds(chosenCorrectTeamIds.filter(id => id !== team.id));
+                                }
+                              }} 
+                            />
                             <span>Mark Correct</span>
                           </label>
                         </div>
@@ -765,15 +821,13 @@ function GameContent() {
             <div className="mt-4 border-t pt-4">
               <div className="flex gap-2">
                 <button onClick={async () => {
-                  const { data } = await supabase.from('final_submissions').select('team_id').eq('final_round', finalRoundId).eq('is_correct', true);
-                  const chosen = (data || []).map((r: any) => r.team_id);
-                  await calculateFinalResults(chosen);
+                  await calculateFinalResults(chosenCorrectTeamIds);
                 }} className="flex-1 px-3 py-2 bg-amber-500 rounded-md font-bold text-[#0d1117]">Calculate</button>
 
                 <button onClick={async () => {
-                  if (!confirm('Force calculate without marking correct teams automatically? You will be able to check before applying.')) return;
+                  if (!confirm('Force calculate without marking correct teams automatically?')) return;
                   await calculateFinalResults([]);
-                }} className="px-3 py-2 bg-red-600 rounded-md text-white">Force Calculate</button>
+                }} className="px-3 py-2 bg-red-600 rounded-md text-white">Force</button>
               </div>
             </div>
           </aside>
@@ -782,7 +836,7 @@ function GameContent() {
     );
   }
 
-  // NON-FINAL rendering remains unchanged (grid etc)
+  // NON-FINAL rendering (grid etc)
   const cols = Math.max(1, categories.length);
   const tileHeight = 80;
   const headerHeight = 56;
@@ -792,7 +846,7 @@ function GameContent() {
       <div className="max-w-[1400px] mx-auto w-full mb-6 pb-4 border-b border-[#2f3748] flex items-center justify-between">
         <MentisLogo isDJ={isDJ} isFinal={isFinal} />
         <div className="flex items-center gap-3">
-          <button onClick={() => fetchGameData(round)} className="bg-[#222733] px-4 py-2 rounded-xl text-xs">Refresh Board</button>
+          <button onClick={() => fetchGameData(round as any)} className="bg-[#222733] px-4 py-2 rounded-xl text-xs">Refresh Board</button>
           <a href="/admin" className="bg-[#222733] px-4 py-2 rounded-xl text-xs">Admin Dashboard</a>
         </div>
       </div>
@@ -882,7 +936,7 @@ function GameContent() {
         </aside>
       </div>
 
-      {/* active question modal (non-final) unchanged */}
+      {/* active question modal (non-final) */}
       {activeQuestion && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4 z-50">
           <div className="bg-[#222733] border-2 border-amber-400/20 max-w-2xl w-full p-8 rounded-3xl shadow-2xl text-center">

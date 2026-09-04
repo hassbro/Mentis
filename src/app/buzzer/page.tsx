@@ -21,6 +21,8 @@ export default function BuzzerPage() {
   const [buzzerActive, setBuzzerActive] = useState(false);
   const [buzzerWinner, setBuzzerWinner] = useState<string | null>(null);
   const [hasBuzzed, setHasBuzzed] = useState(false);
+  const [wager, setWager] = useState('');
+  const [answer, setAnswer] = useState('');
 
   const [currentTurnName, setCurrentTurnName] = useState<string | null>(null);
   const countdownRef = useRef<number | null>(null);
@@ -309,20 +311,34 @@ export default function BuzzerPage() {
                 </div>
 
                 <div className="bg-[#0d1117] border border-[#21262d] p-3.5 rounded-2xl">
-                  <div className="text-[10px] uppercase text-slate-400">Wager (max = your score)</div>
-                  <div className="mt-2 flex gap-2">
-                    <input type="number" min={0} max={teamScore} value={''} placeholder="Enter wager" onChange={() => {}} className="flex-1 bg-[#0d1117] border rounded-xl px-3 py-2" />
-                    <button onClick={() => submitWager(null)} className="px-4 py-2 bg-[#60A5FA] text-[#0d1117] rounded-md font-bold">Submit</button>
-                  </div>
-                </div>
+  <div className="text-[10px] uppercase text-slate-400">Wager (max = your score)</div>
+  <div className="mt-2 flex gap-2">
+    <input 
+      type="number" 
+      min={0} 
+      max={teamScore} 
+      value={wager} // <-- Linked to state
+      placeholder="Enter wager" 
+      onChange={(e) => setWager(e.target.value)} // <-- Updates state as you type
+      className="flex-1 bg-[#0d1117] border rounded-xl px-3 py-2 text-white" 
+    />
+    <button onClick={() => submitWager(wager)} className="px-4 py-2 bg-[#60A5FA] text-[#0d1117] rounded-md font-bold">Submit</button>
+  </div>
+</div>
 
-                <div className="bg-[#0d1117] border border-[#21262d] p-3.5 rounded-2xl">
-                  <div className="text-[10px] uppercase text-slate-400">Final Answer</div>
-                  <div className="mt-2 flex gap-2">
-                    <input type="text" value={''} placeholder="Enter final answer" onChange={() => {}} className="flex-1 bg-[#0d1117] border rounded-xl px-3 py-2" />
-                    <button onClick={() => submitAnswer('')} className="px-4 py-2 bg-emerald-500 text-white rounded-md font-bold">Submit</button>
-                  </div>
-                </div>
+<div className="bg-[#0d1117] border border-[#21262d] p-3.5 rounded-2xl">
+  <div className="text-[10px] uppercase text-slate-400">Final Answer</div>
+  <div className="mt-2 flex gap-2">
+    <input 
+      type="text" 
+      value={answer} // <-- Linked to state
+      placeholder="Enter final answer" 
+      onChange={(e) => setAnswer(e.target.value)} // <-- Updates state as you type
+      className="flex-1 bg-[#0d1117] border rounded-xl px-3 py-2 text-white" 
+    />
+    <button onClick={() => submitAnswer(answer)} className="px-4 py-2 bg-emerald-500 text-white rounded-md font-bold">Submit</button>
+  </div>
+</div>
 
                 <div className="bg-[#0f1720] border border-[#2a313a] rounded-lg p-4 text-left text-sm text-slate-200">
                   <div className="text-[10px] text-slate-400 uppercase">Final Clue</div>
