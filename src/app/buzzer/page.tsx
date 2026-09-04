@@ -259,13 +259,22 @@ export default function BuzzerPage() {
   }
 
   // submit wager / answer (final)
-  async function submitWager(value: number | null) {
-    if (!teamId || !finalRound) { alert('Final not active'); return; }
-    const payload = { team_id: teamId as any, final_round: finalRound as any, wager: value ?? 0, submitted_wager_at: value !== null ? new Date().toISOString() : null };
-    const res = await supabase.from('final_submissions').upsert(payload, { onConflict: ['team_id', 'final_round'] as any });
-    console.debug('submitWager ->', res);
-    if (!res.error) { /* local update not required, subscription will pick up */ }
-  }
+async function submitWager(value: string | number | null) {
+  if (!teamId || !finalRound) { alert('Final not active'); return; }
+  
+  const numericValue = value !== null ? Number(value) : 0;
+  
+  const payload = { 
+    team_id: teamId as any, 
+    final_round: finalRound as any, 
+    wager: numericValue, 
+    submitted_wager_at: value !== null ? new Date().toISOString() : null 
+  };
+  
+  const res = await supabase.from('final_submissions').upsert(payload, { onConflict: ['team_id', 'final_round'] as any });
+  console.debug('submitWager ->', res);
+  if (!res.error) { /* local update not required, subscription will pick up */ }
+}
 
   async function submitAnswer(text: string | null) {
   // 🛑 Prevent submission if the countdown has hit 0
