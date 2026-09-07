@@ -43,3 +43,4 @@ node_modules/
 .next/
 desktop-app/dist/
 desktop-app/node_modules/
+desktop-app/
