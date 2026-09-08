@@ -383,6 +383,9 @@ export default function AdminPage() {
     await supabase.from('questions').update({ is_answered: false }).neq('id', 0);
     await supabase.from('buzzers').update({ active: false, winner_team_id: null }).eq('id', 1);
     
+    // Clear category shuffle for new game
+    await supabase.from('app_settings').update({ category_shuffle_ids: null }).eq('id', 1);
+    
     // Clear localStorage for category tracking
     localStorage.removeItem('mentis_jeopardy_category_names');
     
@@ -576,7 +579,9 @@ export default function AdminPage() {
       active_question_id: null,
       question_revealed: false,
       answer_revealed: false,
-      used_category_names: []
+      used_category_names: [],
+      game_over: false,
+      winner_screen: false
     }).eq('id', 1);
     // Reset questions for new game
     await supabase.from('questions').update({ is_answered: false }).neq('id', 0);
@@ -609,7 +614,9 @@ export default function AdminPage() {
       active_question_id: null,
       question_revealed: false,
       answer_revealed: false,
-      used_category_names: []
+      used_category_names: [],
+      game_over: false,
+      winner_screen: false
     }).eq('id', 1);
     // Note: Don't reset questions for Double Jeopardy - continues from Jeopardy
     console.debug('ADMIN_LAUNCH_DOUBLE clear-state ->', res);

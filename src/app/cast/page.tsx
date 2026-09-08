@@ -100,15 +100,16 @@ export default function CastPage() {
     });
 
     channel.on('broadcast', { event: 'reset_cast' }, (payload: any) => {
-      if (payload.payload && isMountedRef.current) {
-        setShowQR(payload.payload.showQR);
-        setCategories([]);
-        setQuestionsMap({});
-        setShowWinnerModal(false);
-        setIsFinalActive(false);
-        setActiveQuestion(null);
-      }
-    });
+if (payload.payload && isMountedRef.current) {
+setShowQR(payload.payload.showQR);
+setCategories([]);
+setQuestionsMap({});
+setShowWinnerModal(false);
+setIsFinalActive(false);
+setActiveQuestion(null);
+setGameWinner(null);
+}
+});
 
     channel.subscribe();
 

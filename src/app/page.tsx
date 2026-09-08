@@ -68,14 +68,14 @@ export default function Page() {
 }
 
 function GameContent() {
-  const [roundParam, setRoundParam] = useState<string | null>(null);
+  const [roundParam, setRoundParam] = useState<string | null>(() => {
+    if (typeof window !== 'undefined') {
+      return new URLSearchParams(window.location.search).get('round');
+    }
+    return null;
+  });
   const [gameEnded, setGameEnded] = useState(false);
   const [winnerDetails, setWinnerDetails] = useState<{ name: string; score: number } | null>(null);
-
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    setRoundParam(params.get('round'));
-  }, []);
 
   // board state
   const [categories, setCategories] = useState<any[]>([]);
@@ -281,24 +281,69 @@ function GameContent() {
 
     let selectedCategories: any[];
     
-    // Simple deterministic approach: divide by ID ranges
-    const sortedBy = [...uniqueList].sort((a, b) => a.id - b.id);
-    const midpoint = Math.ceil(sortedBy.length / 2);
-    
-    if (currentRound === 'jeopardy') {
-      // First half (lower IDs) - shuffled for randomness
-      const firstHalf = sortedBy.slice(0, midpoint);
-      const shuffled = [...firstHalf].sort(() => Math.random() - 0.5);
-      selectedCategories = shuffled.slice(0, Math.min(5, firstHalf.length));
-      console.log('Jeopardy: Selected from first half (lower IDs), shuffled for randomness');
-      console.log('Selected:', selectedCategories.map(c => ({ id: c.id, name: c.name })));
-    } else {
-      // Second half (higher IDs) - shuffled for randomness
-      const secondHalf = sortedBy.slice(midpoint);
-      const shuffled = [...secondHalf].sort(() => Math.random() - 0.5);
-      selectedCategories = shuffled.slice(0, Math.min(5, secondHalf.length));
-      console.log('Double Jeopardy: Selected from second half (higher IDs), shuffled for randomness');
-      console.log('Selected:', selectedCategories.map(c => ({ id: c.id, name: c.name })));
+    try {
+      // Use database to store shuffled category IDs for randomness across games
+      const { data: settings } = await supabase.from('app_settings').select('category_shuffle_ids').maybeSingle();
+      
+      if (currentRound === 'jeopardy') {
+        // Generate new random shuffle for new game
+        const shuffledIds = [...uniqueList].sort(() => Math.random() - 0.5).map(c => c.id);
+        // Save to database
+        await supabase.from('app_settings').upsert({ 
+          id: 1, 
+          category_shuffle_ids: shuffledIds 
+        }, { onConflict: 'id' });
+        console.log('Jeopardy: Generated new shuffle and saved to DB:', shuffledIds);
+        
+        // Reconstruct categories from shuffled IDs
+        const categoryPairs = shuffledIds
+          .map((id: number) => [id, uniqueList.find(c => c.id === id)] as [number, any])
+          .filter(([id, cat]) => cat !== undefined);
+        const idMap = new Map(categoryPairs);
+        const shuffledCategories = Array.from(idMap.values());
+        
+        // Use first half for Jeopardy
+        const midpoint = Math.ceil(shuffledCategories.length / 2);
+        const firstHalf = shuffledCategories.slice(0, midpoint);
+        selectedCategories = firstHalf.slice(0, Math.min(5, firstHalf.length));
+        console.log('Jeopardy: Selected from first half of shuffled list');
+        console.log('Selected:', selectedCategories.map(c => ({ id: c.id, name: c.name })));
+      } else {
+        // Double Jeopardy: use saved shuffle from database
+        const shuffledIds: number[] = settings?.category_shuffle_ids || [];
+        console.log('Double Jeopardy: Using saved shuffle from DB:', shuffledIds);
+        
+        // Reconstruct categories from shuffled IDs
+        const categoryPairs = shuffledIds
+          .map((id: number): [number, any] => [id, uniqueList.find(c => c.id === id)])
+          .filter((pair): pair is [number, any] => pair[1] !== undefined);
+        const idMap = new Map(categoryPairs);
+        const shuffledCategories = Array.from(idMap.values());
+        
+        // Use second half for Double Jeopardy
+        const midpoint = Math.ceil(shuffledCategories.length / 2);
+        const secondHalf = shuffledCategories.slice(midpoint);
+        selectedCategories = secondHalf.slice(0, Math.min(5, secondHalf.length));
+        console.log('Double Jeopardy: Selected from second half of shuffled list');
+        console.log('Selected:', selectedCategories.map(c => ({ id: c.id, name: c.name })));
+      }
+    } catch (e) {
+      console.error('Database shuffle failed, using ID division fallback:', e);
+      // Fallback: deterministic ID division
+      const sortedBy = [...uniqueList].sort((a, b) => a.id - b.id);
+      const midpoint = Math.ceil(sortedBy.length / 2);
+      
+      if (currentRound === 'jeopardy') {
+        const firstHalf = sortedBy.slice(0, midpoint);
+        const shuffled = [...firstHalf].sort(() => Math.random() - 0.5);
+        selectedCategories = shuffled.slice(0, Math.min(5, firstHalf.length));
+        console.log('Jeopardy Fallback: First half shuffled');
+      } else {
+        const secondHalf = sortedBy.slice(midpoint);
+        const shuffled = [...secondHalf].sort(() => Math.random() - 0.5);
+        selectedCategories = shuffled.slice(0, Math.min(5, secondHalf.length));
+        console.log('Double Jeopardy Fallback: Second half shuffled');
+      }
     }
 
     console.log('Selected categories for this round:', selectedCategories.map(c => ({ id: c.id, name: c.name })));
@@ -745,7 +790,7 @@ if (!finalQ) {
       await supabase.from('teams').update({ score: updatedScore }).eq('id', scoringTeam.id);
       await fetchTeams();
     } else {
-      console.error('No scoring team found!');
+      console.warn('No scoring team found!');
     }
 
     // Mark question as answered globally to prevent repetition
@@ -842,15 +887,31 @@ if (!finalQ) {
               setIsDailyDoubleScreen(false);
               setWagerAmount('');
               setWagerError('');
-              setRound('jeopardy');
+              // 5. Reset game state
+              await supabase.from('game_state').update({
+                game_over: false,
+                winner_screen: false,
+                final_started: false,
+                final_round: null
+              }).eq('id', 1);
               
-              // 5. Refresh data
-              fetchTeams();
-              fetchGameData('jeopardy');
+              // 6. Reset cast screen to QR
+              try {
+                await supabase.channel('cast_categories_sync').send({
+                  type: 'broadcast',
+                  event: 'reset_cast',
+                  payload: { showQR: true }
+                });
+              } catch (e) {
+                console.log('Cast reset broadcast failed:', e);
+              }
+              
+              // 7. Close the window
+              window.close();
             }} 
-            className="w-full py-3 bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold rounded-xl text-sm transition-all shadow-lg"
+            className="w-full py-3 bg-rose-600 hover:bg-rose-500 text-white font-extrabold rounded-xl text-sm transition-all shadow-lg"
           >
-            Return to Board / New Game
+            End Game
           </button>
         </div>
       </main>
