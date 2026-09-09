@@ -1,7 +1,9 @@
 'use client';
 import { useState, useEffect, useRef } from 'react';
-import { supabase } from '@/lib/supabase';
+import { supabase, DAILY_DOUBLE_CHANNEL } from '@/lib/supabase';
 import { Zap, CheckCircle2, AlertCircle } from 'lucide-react';
+
+const SESSION_KEY = 'mentis_buzzer_team';
 
 export default function BuzzerPage() {
   const [teamName, setTeamName] = useState('');
@@ -27,6 +29,14 @@ export default function BuzzerPage() {
   const [answer, setAnswer] = useState('');
 
   const [currentTurnName, setCurrentTurnName] = useState<string | null>(null);
+
+  // daily double (host broadcast)
+  const [ddActive, setDdActive] = useState(false);
+  const [ddPoints, setDdPoints] = useState<number>(0);
+  const [ddEligibleTeamId, setDdEligibleTeamId] = useState<number | null>(null);
+  const [ddWager, setDdWager] = useState('');
+  const [ddSubmitted, setDdSubmitted] = useState<number | null>(null);
+
   const countdownRef = useRef<number | null>(null);
   const subsRef = useRef<any[]>([]);
   const approvalPollRef = useRef<any | null>(null);
@@ -102,6 +112,29 @@ export default function BuzzerPage() {
   countdownRef.current = window.setInterval(tick, 250);
 }
 
+  // Restores a previously registered team so a reload or a sleeping device
+  // does not drop the player out of the game.
+  async function restoreSession() {
+    if (typeof window === 'undefined') return null;
+    const stored = window.localStorage.getItem(SESSION_KEY);
+    if (!stored) return null;
+    try {
+      const { id } = JSON.parse(stored) as { id: number };
+      const { data } = await supabase.from('teams').select('id,name,score,approved').eq('id', id).maybeSingle();
+      if (!data) { window.localStorage.removeItem(SESSION_KEY); return null; }
+      setTeamId(data.id);
+      setTeamName(data.name);
+      setTeamScore(data.score ?? 0);
+      setIsApproved(!!data.approved);
+      setWaitingApproval(!data.approved);
+      if (!data.approved) startApprovalPoll(data.id);
+      return data;
+    } catch {
+      window.localStorage.removeItem(SESSION_KEY);
+      return null;
+    }
+  }
+
   // load question by id (shared)
   async function loadQuestionById(qId: number | null) {
     if (!qId) { setActiveQuestion(null); setFinalQ(null); return; }
@@ -171,22 +204,36 @@ export default function BuzzerPage() {
     if (winnerPollRef.current) { clearInterval(winnerPollRef.current); winnerPollRef.current = null; }
   }
 
+  async function refreshGameState() {
+    const { data } = await supabase.from('game_state').select('*').maybeSingle();
+    if (!data) return;
+    setRawMode(data.mode ?? null);
+    const fStarted = !!data.final_started && !!data.final_round;
+    setFinalStarted(fStarted);
+    setFinalRound(data.final_round ?? null);
+    if (data.active_question_id && (data.question_revealed === true || data.is_question_visible === true)) {
+      await loadQuestionById(data.active_question_id);
+    } else {
+      setActiveQuestion(null);
+      setFinalQ(null);
+    }
+    setShowAnswer(!!data.answer_revealed);
+    if (data.final_countdown_expires_at) startLocalCountdown(data.final_countdown_expires_at);
+    if (data.current_turn_team_id) {
+      const { data: t } = await supabase.from('teams').select('name').eq('id', data.current_turn_team_id).maybeSingle();
+      setCurrentTurnName(t?.name ?? null);
+    } else {
+      setCurrentTurnName(null);
+    }
+  }
+
   // initial load & subscriptions
   useEffect(() => {
     let postCheck: any = null;
 
     (async () => {
-      const { data } = await supabase.from('game_state').select('*').maybeSingle();
-      console.debug('BUZZER: initial game_state ->', data);
-      if (data) {
-        setRawMode(data.mode ?? null);
-        const fStarted = !!data.final_started && !!data.final_round;
-        setFinalStarted(fStarted);
-        setFinalRound(data.final_round ?? null);
-        if (data.active_question_id) await loadQuestionById(data.active_question_id);
-        setShowAnswer(!!data.answer_revealed);
-        if (data.final_countdown_expires_at) startLocalCountdown(data.final_countdown_expires_at);
-      }
+      await restoreSession();
+      await refreshGameState();
       const { data: b } = await supabase.from('buzzers').select('*').eq('id',1).maybeSingle();
       console.debug('BUZZER: initial buzzers ->', b);
       if (b) {
@@ -298,6 +345,36 @@ export default function BuzzerPage() {
     safeSubscribe(bzCh);
     subsRef.current.push(bzCh);
 
+    // daily double channel
+    const ddCh = createChannel(`buzzer_daily_double_${Date.now()}`);
+    ddCh.on('broadcast', { event: 'daily_double_start' }, (msg: { payload?: { points?: number; eligibleTeamId?: number | null } }) => {
+      const p = msg?.payload ?? {};
+      setDdActive(true);
+      setDdPoints(Number(p.points) || 0);
+      setDdEligibleTeamId(p.eligibleTeamId ?? null);
+      setDdWager('');
+      setDdSubmitted(null);
+    });
+    ddCh.on('broadcast', { event: 'daily_double_end' }, () => {
+      setDdActive(false);
+      setDdWager('');
+      setDdSubmitted(null);
+    });
+    safeSubscribe(ddCh);
+    subsRef.current.push(ddCh);
+
+    // Poll as a fallback for devices whose realtime socket is dropped while asleep
+    gsPollRef.current = setInterval(() => {
+      refreshGameState().catch(err => console.error('game state poll error', err));
+    }, 5000);
+
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return;
+      restoreSession();
+      refreshGameState().catch(err => console.error('visibility refresh error', err));
+    };
+    document.addEventListener('visibilitychange', onVisible);
+
     postCheck = setTimeout(async () => {
       try {
         const { data } = await supabase.from('game_state').select('*').maybeSingle();
@@ -316,6 +393,8 @@ export default function BuzzerPage() {
       subsRef.current.forEach((c) => safeRemoveChannel(c));
       subsRef.current = [];
       if (postCheck) clearTimeout(postCheck);
+      document.removeEventListener('visibilitychange', onVisible);
+      if (gsPollRef.current) { clearInterval(gsPollRef.current); gsPollRef.current = null; }
       stopApprovalPoll();
       stopWinnerPoll();
       if (countdownRef.current) { window.clearInterval(countdownRef.current); countdownRef.current = null; }
@@ -354,7 +433,28 @@ export default function BuzzerPage() {
       setWaitingApproval(!data.approved);
       setIsApproved(!!data.approved);
       setTeamScore(data.score ?? 0);
+      window.localStorage.setItem(SESSION_KEY, JSON.stringify({ id: data.id, name: data.name }));
       if (!data.approved) startApprovalPoll(data.id);
+    }
+  }
+
+  async function submitDailyDoubleWager() {
+    if (!teamId) return;
+    const value = Number(ddWager);
+    const maxAllowed = Math.max(ddPoints, teamScore);
+    if (Number.isNaN(value) || value < 5 || value > maxAllowed) {
+      alert(`Wager must be between 5 and ${maxAllowed}`);
+      return;
+    }
+    try {
+      await supabase.channel(DAILY_DOUBLE_CHANNEL).send({
+        type: 'broadcast',
+        event: 'wager_submitted',
+        payload: { teamId, wager: value }
+      });
+      setDdSubmitted(value);
+    } catch (e) {
+      console.error('Failed to submit daily double wager', e);
     }
   }
 
@@ -405,6 +505,30 @@ async function submitWager(value: string | number | null) {
     const res = await supabase.from('buzzers').update({ active: false, winner_team_id: teamId }).eq('id', 1);
     console.debug('buzz write ->', res);
   }
+
+  const canWagerDailyDouble = ddActive && (ddEligibleTeamId === null || ddEligibleTeamId === teamId);
+
+  const dailyDoubleCard = canWagerDailyDouble ? (
+    <div className="bg-amber-500/10 border border-amber-500/40 p-3.5 rounded-2xl">
+      <div className="text-[10px] uppercase tracking-widest text-amber-400 font-black">Daily Double — Place Your Wager</div>
+      <div className="text-[10px] text-slate-400 mt-1">Between 5 and {Math.max(ddPoints, teamScore)}</div>
+      <div className="mt-2 flex gap-2">
+        <input
+          type="number"
+          min={5}
+          max={Math.max(ddPoints, teamScore)}
+          value={ddWager}
+          placeholder="Enter wager"
+          onChange={(e) => setDdWager(e.target.value)}
+          className="flex-1 bg-[#0d1117] border border-[#21262d] rounded-xl px-3 py-2 text-white"
+        />
+        <button onClick={submitDailyDoubleWager} className="px-4 py-2 bg-amber-400 text-[#0d1117] rounded-md font-bold">Submit</button>
+      </div>
+      {ddSubmitted !== null && (
+        <div className="text-[10px] text-emerald-400 font-bold mt-2">Wager of {ddSubmitted} sent to the host.</div>
+      )}
+    </div>
+  ) : null;
 
   // decide effectiveMode for UI (respects explicit buzzer/turn mode over stale finalStarted flags)
   const effectiveMode = rawMode === 'buzzer' ? 'buzzer' : (rawMode === 'turn' ? 'turn' : (finalStarted ? 'final' : 'buzzer'));
@@ -512,6 +636,8 @@ async function submitWager(value: string | number | null) {
               </div>
             ) : effectiveMode === 'turn' ? (
               <div className="space-y-4">
+                {dailyDoubleCard}
+
                 <div className="bg-[#0d1117] border border-[#21262d] p-3.5 rounded-2xl">
                   <div className="text-[10px] text-slate-400 uppercase tracking-widest">Active Question / Clue</div>
                   <div className="mt-3 bg-[#0f1720] border border-[#2a313a] rounded-lg p-4 text-left text-sm leading-relaxed">{activeQuestion?.clue ?? 'No active question revealed'}</div>
@@ -535,6 +661,8 @@ async function submitWager(value: string | number | null) {
                   <div className="text-xs">Team Score</div>
                   <div className="font-black text-2xl">{teamScore}</div>
                 </div>
+
+                {dailyDoubleCard}
 
                 {/* Question & Answer display added for Buzzer Mode */}
                 <div className="bg-[#0d1117] border border-[#21262d] p-3.5 rounded-2xl">

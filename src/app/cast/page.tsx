@@ -8,6 +8,7 @@ export default function CastPage() {
   const [categories, setCategories] = useState<any[]>([]);
   const [questionsMap, setQuestionsMap] = useState<{ [catId: number]: { [points: number]: any } }>({});
   const [activeQuestion, setActiveQuestion] = useState<any | null>(null);
+  const [activeMeta, setActiveMeta] = useState<{ questionId: number; categoryName: string | null; points: number; isDailyDouble: boolean } | null>(null);
   const [buzzerWinnerName, setBuzzerWinnerName] = useState<string | null>(null);
   const [originUrl, setOriginUrl] = useState('');
   const [showQR, setShowQR] = useState(true);
@@ -67,6 +68,17 @@ export default function CastPage() {
         setShowQR(false); 
         setGameEnded(false); // Reset game ended when new board loads
       }
+    });
+
+    channel.on('broadcast', { event: 'active_question_meta' }, (payload: { payload?: { questionId?: number; categoryName?: string | null; points?: number; isDailyDouble?: boolean } }) => {
+      const p = payload?.payload;
+      if (!p || !isMountedRef.current) return;
+      setActiveMeta({
+        questionId: Number(p.questionId),
+        categoryName: p.categoryName ?? null,
+        points: Number(p.points) || 0,
+        isDailyDouble: !!p.isDailyDouble
+      });
     });
 
     channel.on('broadcast', { event: 'game_winner' }, (payload: any) => {
@@ -210,6 +222,31 @@ setGameWinner(null);
     if (data && isMountedRef.current) setActiveQuestion(data);
   }
 
+  // Board metadata for the active clue: prefer the host broadcast (which carries the
+  // round-adjusted point value), otherwise resolve it from the rendered board.
+  const activeBoardInfo = (() => {
+    if (!activeQuestion) return { categoryName: null as string | null, points: null as number | null, isDailyDouble: false };
+    if (activeMeta && activeMeta.questionId === activeQuestion.id) {
+      return { categoryName: activeMeta.categoryName, points: activeMeta.points, isDailyDouble: activeMeta.isDailyDouble };
+    }
+    for (const [catId, catQs] of Object.entries(questionsMap)) {
+      for (const [pt, q] of Object.entries(catQs || {})) {
+        if ((q as { id?: number } | null)?.id === activeQuestion.id) {
+          return {
+            categoryName: categories.find((c: { id: number; name: string }) => c.id === Number(catId))?.name ?? null,
+            points: Number(pt),
+            isDailyDouble: false
+          };
+        }
+      }
+    }
+    return {
+      categoryName: categories.find((c: { id: number; name: string }) => c.id === activeQuestion.category_id)?.name ?? null,
+      points: activeQuestion.points ?? null,
+      isDailyDouble: false
+    };
+  })();
+
   const isGameStarted = categories.length > 0 && !showQR;
   const hasActiveQuestion = gameState?.active_question_id && activeQuestion;
   const isQuestionVisible = (gameState?.is_question_visible === true || gameState?.question_revealed === true) && hasActiveQuestion;
@@ -326,7 +363,9 @@ setGameWinner(null);
           ) : isQuestionVisible ? (
             <div className="w-full bg-slate-900/90 border border-slate-700 rounded-3xl p-12 shadow-2xl text-center space-y-6">
               <div className="text-amber-400 font-bold text-sm uppercase tracking-widest">
-                Active Clue ({activeQuestion.points} Points)
+                {activeBoardInfo.categoryName ?? 'Active Clue'}
+                {activeBoardInfo.points !== null && ` — ${activeBoardInfo.points} Points`}
+                {activeBoardInfo.isDailyDouble && ' — Daily Double'}
               </div>
 
               <div className="text-3xl font-extrabold text-slate-100 leading-relaxed">
