@@ -171,7 +171,7 @@ function GameContent() {
 
   // Receive daily double wagers submitted from buzzer clients
   useEffect(() => {
-    const ch = createChannel(`host_daily_double_${Date.now()}`);
+    const ch = createChannel(DAILY_DOUBLE_CHANNEL);
     ch.on('broadcast', { event: 'wager_submitted' }, (msg: { payload?: { teamId?: number; wager?: number } }) => {
       const teamId = Number(msg?.payload?.teamId);
       const wager = Number(msg?.payload?.wager);
@@ -801,13 +801,19 @@ if (!finalQ) {
     return teams.find(t => t.id === eligibleId) ?? teams[activeTeamIndex];
   }
 
-  async function broadcastDailyDouble(question: { id: number; points: number }) {
+  async function broadcastDailyDouble(question: { id: number; points: number; clue?: string }) {
     const eligibleTeamId = wagerTeam()?.id ?? null;
     try {
       await supabase.channel(DAILY_DOUBLE_CHANNEL).send({
         type: 'broadcast',
         event: 'daily_double_start',
-        payload: { questionId: question.id, points: question.points, eligibleTeamId }
+        payload: {
+          questionId: question.id,
+          points: question.points,
+          eligibleTeamId,
+          eligibleTeamName: wagerTeam()?.name ?? null,
+          clue: question.clue ?? null
+        }
       });
     } catch (e) {
       console.error('Failed to broadcast daily double', e);

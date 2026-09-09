@@ -41,6 +41,7 @@ export default function BuzzerPage() {
   const subsRef = useRef<any[]>([]);
   const approvalPollRef = useRef<any | null>(null);
   const gsPollRef = useRef<any | null>(null);
+  const ddChannelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const winnerPollRef = useRef<any | null>(null);
 
   // Winner screen state
@@ -346,7 +347,7 @@ export default function BuzzerPage() {
     subsRef.current.push(bzCh);
 
     // daily double channel
-    const ddCh = createChannel(`buzzer_daily_double_${Date.now()}`);
+    const ddCh = createChannel(DAILY_DOUBLE_CHANNEL);
     ddCh.on('broadcast', { event: 'daily_double_start' }, (msg: { payload?: { points?: number; eligibleTeamId?: number | null } }) => {
       const p = msg?.payload ?? {};
       setDdActive(true);
@@ -361,6 +362,7 @@ export default function BuzzerPage() {
       setDdSubmitted(null);
     });
     safeSubscribe(ddCh);
+    ddChannelRef.current = ddCh;
     subsRef.current.push(ddCh);
 
     // Poll as a fallback for devices whose realtime socket is dropped while asleep
@@ -447,10 +449,10 @@ export default function BuzzerPage() {
       return;
     }
     try {
-      await supabase.channel(DAILY_DOUBLE_CHANNEL).send({
+      await (ddChannelRef.current ?? supabase.channel(DAILY_DOUBLE_CHANNEL)).send({
         type: 'broadcast',
         event: 'wager_submitted',
-        payload: { teamId, wager: value }
+        payload: { teamId, wager: value, teamName }
       });
       setDdSubmitted(value);
     } catch (e) {
@@ -508,25 +510,39 @@ async function submitWager(value: string | number | null) {
 
   const canWagerDailyDouble = ddActive && (ddEligibleTeamId === null || ddEligibleTeamId === teamId);
 
-  const dailyDoubleCard = canWagerDailyDouble ? (
-    <div className="bg-amber-500/10 border border-amber-500/40 p-3.5 rounded-2xl">
-      <div className="text-[10px] uppercase tracking-widest text-amber-400 font-black">Daily Double — Place Your Wager</div>
-      <div className="text-[10px] text-slate-400 mt-1">Between 5 and {Math.max(ddPoints, teamScore)}</div>
-      <div className="mt-2 flex gap-2">
+  // Shown as a modal so the wager cannot be missed while the host waits for it
+  const dailyDoubleModal = canWagerDailyDouble ? (
+    <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-6">
+      <div className="w-full max-w-sm bg-[#161b22] border border-amber-500/50 rounded-3xl p-6 space-y-4 shadow-2xl">
+        <div className="text-center">
+          <div className="text-xs uppercase tracking-[0.3em] text-amber-400 font-black">Daily Double</div>
+          <div className="text-sm text-slate-300 mt-2">Place your wager</div>
+          <div className="text-[11px] text-slate-500 mt-1">Between 5 and {Math.max(ddPoints, teamScore)} (your score: {teamScore})</div>
+        </div>
+
         <input
           type="number"
+          inputMode="numeric"
           min={5}
           max={Math.max(ddPoints, teamScore)}
           value={ddWager}
           placeholder="Enter wager"
+          autoFocus
           onChange={(e) => setDdWager(e.target.value)}
-          className="flex-1 bg-[#0d1117] border border-[#21262d] rounded-xl px-3 py-2 text-white"
+          className="w-full bg-[#0d1117] border border-[#21262d] rounded-xl px-4 py-3 text-2xl text-center font-black text-white outline-none focus:border-amber-400"
         />
-        <button onClick={submitDailyDoubleWager} className="px-4 py-2 bg-amber-400 text-[#0d1117] rounded-md font-bold">Submit</button>
+
+        <button
+          onClick={submitDailyDoubleWager}
+          className="w-full py-3 bg-amber-400 text-[#0d1117] rounded-xl font-black"
+        >
+          {ddSubmitted !== null ? 'Update Wager' : 'Submit Wager'}
+        </button>
+
+        {ddSubmitted !== null && (
+          <div className="text-[11px] text-emerald-400 font-bold text-center">Wager of {ddSubmitted} sent to the host.</div>
+        )}
       </div>
-      {ddSubmitted !== null && (
-        <div className="text-[10px] text-emerald-400 font-bold mt-2">Wager of {ddSubmitted} sent to the host.</div>
-      )}
     </div>
   ) : null;
 
@@ -537,6 +553,7 @@ async function submitWager(value: string | number | null) {
   // render
   return (
     <main className="min-h-screen w-full bg-[#0d1117] text-slate-100 flex items-center justify-center p-6">
+      {dailyDoubleModal}
       <div className="max-w-md w-full bg-[#161b22] border border-[#21262d] p-6 rounded-3xl shadow-2xl">
         {!teamId && (
           <form onSubmit={handleRegister} className="space-y-4">
@@ -636,8 +653,6 @@ async function submitWager(value: string | number | null) {
               </div>
             ) : effectiveMode === 'turn' ? (
               <div className="space-y-4">
-                {dailyDoubleCard}
-
                 <div className="bg-[#0d1117] border border-[#21262d] p-3.5 rounded-2xl">
                   <div className="text-[10px] text-slate-400 uppercase tracking-widest">Active Question / Clue</div>
                   <div className="mt-3 bg-[#0f1720] border border-[#2a313a] rounded-lg p-4 text-left text-sm leading-relaxed">{activeQuestion?.clue ?? 'No active question revealed'}</div>
@@ -661,8 +676,6 @@ async function submitWager(value: string | number | null) {
                   <div className="text-xs">Team Score</div>
                   <div className="font-black text-2xl">{teamScore}</div>
                 </div>
-
-                {dailyDoubleCard}
 
                 {/* Question & Answer display added for Buzzer Mode */}
                 <div className="bg-[#0d1117] border border-[#21262d] p-3.5 rounded-2xl">
