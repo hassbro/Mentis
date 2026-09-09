@@ -585,6 +585,8 @@ export default function AdminPage() {
     }).eq('id', 1);
     // Reset questions for new game
     await supabase.from('questions').update({ is_answered: false }).neq('id', 0);
+    // Drop the stored shuffle so the new game builds a fresh board
+    await supabase.from('app_settings').update({ category_shuffle_ids: null }).eq('id', 1);
     // Clear localStorage for category tracking
     localStorage.removeItem('mentis_jeopardy_category_names');
     console.debug('ADMIN_LAUNCH_MENTIS clear-state ->', res);

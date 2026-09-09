@@ -1,7 +1,9 @@
 'use client';
 import { useState, useEffect, useRef } from 'react';
-import { supabase } from '@/lib/supabase';
+import { supabase, DAILY_DOUBLE_CHANNEL } from '@/lib/supabase';
 import { Zap, CheckCircle2, AlertCircle } from 'lucide-react';
+
+const SESSION_KEY = 'mentis_buzzer_team';
 
 export default function BuzzerPage() {
   const [teamName, setTeamName] = useState('');
@@ -27,10 +29,19 @@ export default function BuzzerPage() {
   const [answer, setAnswer] = useState('');
 
   const [currentTurnName, setCurrentTurnName] = useState<string | null>(null);
+
+  // daily double (host broadcast)
+  const [ddActive, setDdActive] = useState(false);
+  const [ddPoints, setDdPoints] = useState<number>(0);
+  const [ddEligibleTeamId, setDdEligibleTeamId] = useState<number | null>(null);
+  const [ddWager, setDdWager] = useState('');
+  const [ddSubmitted, setDdSubmitted] = useState<number | null>(null);
+
   const countdownRef = useRef<number | null>(null);
   const subsRef = useRef<any[]>([]);
   const approvalPollRef = useRef<any | null>(null);
   const gsPollRef = useRef<any | null>(null);
+  const ddChannelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const winnerPollRef = useRef<any | null>(null);
 
   // Winner screen state
@@ -102,6 +113,29 @@ export default function BuzzerPage() {
   countdownRef.current = window.setInterval(tick, 250);
 }
 
+  // Restores a previously registered team so a reload or a sleeping device
+  // does not drop the player out of the game.
+  async function restoreSession() {
+    if (typeof window === 'undefined') return null;
+    const stored = window.localStorage.getItem(SESSION_KEY);
+    if (!stored) return null;
+    try {
+      const { id } = JSON.parse(stored) as { id: number };
+      const { data } = await supabase.from('teams').select('id,name,score,approved').eq('id', id).maybeSingle();
+      if (!data) { window.localStorage.removeItem(SESSION_KEY); return null; }
+      setTeamId(data.id);
+      setTeamName(data.name);
+      setTeamScore(data.score ?? 0);
+      setIsApproved(!!data.approved);
+      setWaitingApproval(!data.approved);
+      if (!data.approved) startApprovalPoll(data.id);
+      return data;
+    } catch {
+      window.localStorage.removeItem(SESSION_KEY);
+      return null;
+    }
+  }
+
   // load question by id (shared)
   async function loadQuestionById(qId: number | null) {
     if (!qId) { setActiveQuestion(null); setFinalQ(null); return; }
@@ -171,22 +205,36 @@ export default function BuzzerPage() {
     if (winnerPollRef.current) { clearInterval(winnerPollRef.current); winnerPollRef.current = null; }
   }
 
+  async function refreshGameState() {
+    const { data } = await supabase.from('game_state').select('*').maybeSingle();
+    if (!data) return;
+    setRawMode(data.mode ?? null);
+    const fStarted = !!data.final_started && !!data.final_round;
+    setFinalStarted(fStarted);
+    setFinalRound(data.final_round ?? null);
+    if (data.active_question_id && (data.question_revealed === true || data.is_question_visible === true)) {
+      await loadQuestionById(data.active_question_id);
+    } else {
+      setActiveQuestion(null);
+      setFinalQ(null);
+    }
+    setShowAnswer(!!data.answer_revealed);
+    if (data.final_countdown_expires_at) startLocalCountdown(data.final_countdown_expires_at);
+    if (data.current_turn_team_id) {
+      const { data: t } = await supabase.from('teams').select('name').eq('id', data.current_turn_team_id).maybeSingle();
+      setCurrentTurnName(t?.name ?? null);
+    } else {
+      setCurrentTurnName(null);
+    }
+  }
+
   // initial load & subscriptions
   useEffect(() => {
     let postCheck: any = null;
 
     (async () => {
-      const { data } = await supabase.from('game_state').select('*').maybeSingle();
-      console.debug('BUZZER: initial game_state ->', data);
-      if (data) {
-        setRawMode(data.mode ?? null);
-        const fStarted = !!data.final_started && !!data.final_round;
-        setFinalStarted(fStarted);
-        setFinalRound(data.final_round ?? null);
-        if (data.active_question_id) await loadQuestionById(data.active_question_id);
-        setShowAnswer(!!data.answer_revealed);
-        if (data.final_countdown_expires_at) startLocalCountdown(data.final_countdown_expires_at);
-      }
+      await restoreSession();
+      await refreshGameState();
       const { data: b } = await supabase.from('buzzers').select('*').eq('id',1).maybeSingle();
       console.debug('BUZZER: initial buzzers ->', b);
       if (b) {
@@ -298,6 +346,37 @@ export default function BuzzerPage() {
     safeSubscribe(bzCh);
     subsRef.current.push(bzCh);
 
+    // daily double channel
+    const ddCh = createChannel(DAILY_DOUBLE_CHANNEL);
+    ddCh.on('broadcast', { event: 'daily_double_start' }, (msg: { payload?: { points?: number; eligibleTeamId?: number | null } }) => {
+      const p = msg?.payload ?? {};
+      setDdActive(true);
+      setDdPoints(Number(p.points) || 0);
+      setDdEligibleTeamId(p.eligibleTeamId ?? null);
+      setDdWager('');
+      setDdSubmitted(null);
+    });
+    ddCh.on('broadcast', { event: 'daily_double_end' }, () => {
+      setDdActive(false);
+      setDdWager('');
+      setDdSubmitted(null);
+    });
+    safeSubscribe(ddCh);
+    ddChannelRef.current = ddCh;
+    subsRef.current.push(ddCh);
+
+    // Poll as a fallback for devices whose realtime socket is dropped while asleep
+    gsPollRef.current = setInterval(() => {
+      refreshGameState().catch(err => console.error('game state poll error', err));
+    }, 5000);
+
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return;
+      restoreSession();
+      refreshGameState().catch(err => console.error('visibility refresh error', err));
+    };
+    document.addEventListener('visibilitychange', onVisible);
+
     postCheck = setTimeout(async () => {
       try {
         const { data } = await supabase.from('game_state').select('*').maybeSingle();
@@ -316,6 +395,8 @@ export default function BuzzerPage() {
       subsRef.current.forEach((c) => safeRemoveChannel(c));
       subsRef.current = [];
       if (postCheck) clearTimeout(postCheck);
+      document.removeEventListener('visibilitychange', onVisible);
+      if (gsPollRef.current) { clearInterval(gsPollRef.current); gsPollRef.current = null; }
       stopApprovalPoll();
       stopWinnerPoll();
       if (countdownRef.current) { window.clearInterval(countdownRef.current); countdownRef.current = null; }
@@ -354,7 +435,28 @@ export default function BuzzerPage() {
       setWaitingApproval(!data.approved);
       setIsApproved(!!data.approved);
       setTeamScore(data.score ?? 0);
+      window.localStorage.setItem(SESSION_KEY, JSON.stringify({ id: data.id, name: data.name }));
       if (!data.approved) startApprovalPoll(data.id);
+    }
+  }
+
+  async function submitDailyDoubleWager() {
+    if (!teamId) return;
+    const value = Number(ddWager);
+    const maxAllowed = Math.max(ddPoints, teamScore);
+    if (Number.isNaN(value) || value < 5 || value > maxAllowed) {
+      alert(`Wager must be between 5 and ${maxAllowed}`);
+      return;
+    }
+    try {
+      await (ddChannelRef.current ?? supabase.channel(DAILY_DOUBLE_CHANNEL)).send({
+        type: 'broadcast',
+        event: 'wager_submitted',
+        payload: { teamId, wager: value, teamName }
+      });
+      setDdSubmitted(value);
+    } catch (e) {
+      console.error('Failed to submit daily double wager', e);
     }
   }
 
@@ -406,6 +508,44 @@ async function submitWager(value: string | number | null) {
     console.debug('buzz write ->', res);
   }
 
+  const canWagerDailyDouble = ddActive && (ddEligibleTeamId === null || ddEligibleTeamId === teamId);
+
+  // Shown as a modal so the wager cannot be missed while the host waits for it
+  const dailyDoubleModal = canWagerDailyDouble ? (
+    <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-6">
+      <div className="w-full max-w-sm bg-[#161b22] border border-amber-500/50 rounded-3xl p-6 space-y-4 shadow-2xl">
+        <div className="text-center">
+          <div className="text-xs uppercase tracking-[0.3em] text-amber-400 font-black">Daily Double</div>
+          <div className="text-sm text-slate-300 mt-2">Place your wager</div>
+          <div className="text-[11px] text-slate-500 mt-1">Between 5 and {Math.max(ddPoints, teamScore)} (your score: {teamScore})</div>
+        </div>
+
+        <input
+          type="number"
+          inputMode="numeric"
+          min={5}
+          max={Math.max(ddPoints, teamScore)}
+          value={ddWager}
+          placeholder="Enter wager"
+          autoFocus
+          onChange={(e) => setDdWager(e.target.value)}
+          className="w-full bg-[#0d1117] border border-[#21262d] rounded-xl px-4 py-3 text-2xl text-center font-black text-white outline-none focus:border-amber-400"
+        />
+
+        <button
+          onClick={submitDailyDoubleWager}
+          className="w-full py-3 bg-amber-400 text-[#0d1117] rounded-xl font-black"
+        >
+          {ddSubmitted !== null ? 'Update Wager' : 'Submit Wager'}
+        </button>
+
+        {ddSubmitted !== null && (
+          <div className="text-[11px] text-emerald-400 font-bold text-center">Wager of {ddSubmitted} sent to the host.</div>
+        )}
+      </div>
+    </div>
+  ) : null;
+
   // decide effectiveMode for UI (respects explicit buzzer/turn mode over stale finalStarted flags)
   const effectiveMode = rawMode === 'buzzer' ? 'buzzer' : (rawMode === 'turn' ? 'turn' : (finalStarted ? 'final' : 'buzzer'));
   console.debug('BUZZER render effectiveMode=', effectiveMode, { rawMode, finalStarted, finalRound, activeQuestionId: activeQuestion?.id, finalQId: finalQ?.id, showAnswer });
@@ -413,6 +553,7 @@ async function submitWager(value: string | number | null) {
   // render
   return (
     <main className="min-h-screen w-full bg-[#0d1117] text-slate-100 flex items-center justify-center p-6">
+      {dailyDoubleModal}
       <div className="max-w-md w-full bg-[#161b22] border border-[#21262d] p-6 rounded-3xl shadow-2xl">
         {!teamId && (
           <form onSubmit={handleRegister} className="space-y-4">

@@ -1,6 +1,6 @@
 'use client';
 import { useEffect, useState, useRef } from 'react';
-import { supabase } from '@/lib/supabase';
+import { supabase, DAILY_DOUBLE_CHANNEL } from '@/lib/supabase';
 
 export default function CastPage() {
   const [gameState, setGameState] = useState<any | null>(null);
@@ -8,6 +8,9 @@ export default function CastPage() {
   const [categories, setCategories] = useState<any[]>([]);
   const [questionsMap, setQuestionsMap] = useState<{ [catId: number]: { [points: number]: any } }>({});
   const [activeQuestion, setActiveQuestion] = useState<any | null>(null);
+  const [dailyDouble, setDailyDouble] = useState<{ points: number; teamName: string | null } | null>(null);
+  const [dailyDoubleWagers, setDailyDoubleWagers] = useState<{ teamId: number; teamName: string | null; wager: number }[]>([]);
+  const [activeMeta, setActiveMeta] = useState<{ questionId: number; categoryName: string | null; points: number; isDailyDouble: boolean } | null>(null);
   const [buzzerWinnerName, setBuzzerWinnerName] = useState<string | null>(null);
   const [originUrl, setOriginUrl] = useState('');
   const [showQR, setShowQR] = useState(true);
@@ -69,6 +72,17 @@ export default function CastPage() {
       }
     });
 
+    channel.on('broadcast', { event: 'active_question_meta' }, (payload: { payload?: { questionId?: number; categoryName?: string | null; points?: number; isDailyDouble?: boolean } }) => {
+      const p = payload?.payload;
+      if (!p || !isMountedRef.current) return;
+      setActiveMeta({
+        questionId: Number(p.questionId),
+        categoryName: p.categoryName ?? null,
+        points: Number(p.points) || 0,
+        isDailyDouble: !!p.isDailyDouble
+      });
+    });
+
     channel.on('broadcast', { event: 'game_winner' }, (payload: any) => {
       console.log('=== CAST PAGE WINNER DEBUG ===');
       console.log('Cast page received game winner event:', payload);
@@ -112,6 +126,28 @@ setGameWinner(null);
 });
 
     channel.subscribe();
+
+    // Daily Double wager overlay mirrored from the host / buzzer clients
+    const ddCh = supabase.channel(DAILY_DOUBLE_CHANNEL);
+    ddCh.on('broadcast', { event: 'daily_double_start' }, (msg: { payload?: { points?: number; eligibleTeamName?: string | null } }) => {
+      if (!isMountedRef.current) return;
+      setDailyDouble({ points: Number(msg?.payload?.points) || 0, teamName: msg?.payload?.eligibleTeamName ?? null });
+      setDailyDoubleWagers([]);
+    });
+    ddCh.on('broadcast', { event: 'wager_submitted' }, (msg: { payload?: { teamId?: number; teamName?: string | null; wager?: number } }) => {
+      const p = msg?.payload;
+      if (!p?.teamId || !isMountedRef.current) return;
+      setDailyDoubleWagers(prev => [
+        ...prev.filter(w => w.teamId !== p.teamId),
+        { teamId: p.teamId!, teamName: p.teamName ?? null, wager: Number(p.wager) || 0 }
+      ]);
+    });
+    ddCh.on('broadcast', { event: 'daily_double_end' }, () => {
+      if (!isMountedRef.current) return;
+      setDailyDouble(null);
+      setDailyDoubleWagers([]);
+    });
+    ddCh.subscribe();
 
     // Real-time listener for question tile updates
     const questionsCh = supabase.channel(`cast_questions_${Date.now()}`);
@@ -193,6 +229,7 @@ setGameWinner(null);
       isMountedRef.current = false;
       clearInterval(pollInterval);
       supabase.removeChannel(channel);
+      supabase.removeChannel(ddCh);
       supabase.removeChannel(questionsCh);
       supabase.removeChannel(gsCh);
       supabase.removeChannel(bzCh);
@@ -209,6 +246,31 @@ setGameWinner(null);
     const { data } = await supabase.from('questions').select('*').eq('id', qId).maybeSingle();
     if (data && isMountedRef.current) setActiveQuestion(data);
   }
+
+  // Board metadata for the active clue: prefer the host broadcast (which carries the
+  // round-adjusted point value), otherwise resolve it from the rendered board.
+  const activeBoardInfo = (() => {
+    if (!activeQuestion) return { categoryName: null as string | null, points: null as number | null, isDailyDouble: false };
+    if (activeMeta && activeMeta.questionId === activeQuestion.id) {
+      return { categoryName: activeMeta.categoryName, points: activeMeta.points, isDailyDouble: activeMeta.isDailyDouble };
+    }
+    for (const [catId, catQs] of Object.entries(questionsMap)) {
+      for (const [pt, q] of Object.entries(catQs || {})) {
+        if ((q as { id?: number } | null)?.id === activeQuestion.id) {
+          return {
+            categoryName: categories.find((c: { id: number; name: string }) => c.id === Number(catId))?.name ?? null,
+            points: Number(pt),
+            isDailyDouble: false
+          };
+        }
+      }
+    }
+    return {
+      categoryName: categories.find((c: { id: number; name: string }) => c.id === activeQuestion.category_id)?.name ?? null,
+      points: activeQuestion.points ?? null,
+      isDailyDouble: false
+    };
+  })();
 
   const isGameStarted = categories.length > 0 && !showQR;
   const hasActiveQuestion = gameState?.active_question_id && activeQuestion;
@@ -252,6 +314,30 @@ setGameWinner(null);
 
   return (
     <main className="min-h-screen bg-[#0b0f19] text-white p-6 flex flex-col justify-between select-none relative">
+      {dailyDouble && (
+        <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-10">
+          <div className="w-full max-w-3xl bg-[#111827] border-2 border-amber-500/60 rounded-3xl p-12 text-center space-y-6 shadow-2xl">
+            <div className="text-amber-400 text-sm uppercase tracking-[0.5em] font-black">Daily Double</div>
+            <div className="text-6xl font-black text-slate-100">
+              {dailyDouble.teamName ?? 'Team'}
+            </div>
+            <div className="text-slate-400 text-lg">
+              Waiting for the wager — up to {dailyDouble.points} points
+            </div>
+
+            {dailyDoubleWagers.length > 0 && (
+              <div className="space-y-2 pt-2">
+                {dailyDoubleWagers.map(w => (
+                  <div key={w.teamId} className="text-3xl font-black text-emerald-400">
+                    {w.teamName ?? 'Team'} wagers {w.wager}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Top Header */}
       <header className="flex justify-between items-center border-b border-slate-800 pb-4 mb-6">
         <div className="flex items-center space-x-3">
@@ -326,7 +412,9 @@ setGameWinner(null);
           ) : isQuestionVisible ? (
             <div className="w-full bg-slate-900/90 border border-slate-700 rounded-3xl p-12 shadow-2xl text-center space-y-6">
               <div className="text-amber-400 font-bold text-sm uppercase tracking-widest">
-                Active Clue ({activeQuestion.points} Points)
+                {activeBoardInfo.categoryName ?? 'Active Clue'}
+                {activeBoardInfo.points !== null && ` — ${activeBoardInfo.points} Points`}
+                {activeBoardInfo.isDailyDouble && ' — Daily Double'}
               </div>
 
               <div className="text-3xl font-extrabold text-slate-100 leading-relaxed">

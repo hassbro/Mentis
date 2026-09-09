@@ -1,7 +1,7 @@
 'use client';
 import { useState, useEffect, Suspense, useRef } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { supabase } from '@/lib/supabase';
+import { supabase, DAILY_DOUBLE_CHANNEL } from '@/lib/supabase';
 import {
   RefreshCw,
   Trophy,
@@ -97,6 +97,7 @@ function GameContent() {
   const [isDailyDoubleScreen, setIsDailyDoubleScreen] = useState(false);
   const [wagerAmount, setWagerAmount] = useState<string>('');
   const [wagerError, setWagerError] = useState<string>('');
+  const [receivedWagers, setReceivedWagers] = useState<{ teamId: number; wager: number }[]>([]);
 
   // final
   const [finalQuestion, setFinalQuestion] = useState<any | null>(null);
@@ -124,6 +125,7 @@ function GameContent() {
   // channel refs (for safe cleanup / reuse)
   const finalSubsChannelRef = useRef<any | null>(null);
   const gameStateChannelRef = useRef<any | null>(null);
+  const dailyDoubleChannelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
 
   // --- Channel helpers ---
   function createChannel(name: string) {
@@ -167,10 +169,32 @@ function GameContent() {
   }
   useEffect(() => { fetchTeams(); }, []);
 
+  // Receive daily double wagers submitted from buzzer clients
+  useEffect(() => {
+    const ch = createChannel(DAILY_DOUBLE_CHANNEL);
+    ch.on('broadcast', { event: 'wager_submitted' }, (msg: { payload?: { teamId?: number; wager?: number } }) => {
+      const teamId = Number(msg?.payload?.teamId);
+      const wager = Number(msg?.payload?.wager);
+      if (!teamId || Number.isNaN(wager)) return;
+      setReceivedWagers(prev => [...prev.filter(w => w.teamId !== teamId), { teamId, wager }]);
+      setWagerAmount(String(wager));
+    });
+    safeSubscribe(ch);
+    dailyDoubleChannelRef.current = ch;
+    return () => {
+      safeRemoveChannel(dailyDoubleChannelRef.current);
+      dailyDoubleChannelRef.current = null;
+    };
+  }, []);
+
   useEffect(() => {
     const targetRound = (roundParam === 'double_jeopardy' || roundParam === 'final') ? roundParam : 'jeopardy';
     if (targetRound === 'final') startFinalMentis();
-    else { setRound(targetRound as any); fetchGameData(targetRound as any); }
+    else {
+      const boardRound: 'jeopardy' | 'double_jeopardy' = targetRound === 'double_jeopardy' ? 'double_jeopardy' : 'jeopardy';
+      setRound(boardRound);
+      fetchGameData(boardRound).then(() => ensureCurrentTurn());
+    }
   }, [roundParam]);
 
   // Real-time listener for who buzzed first
@@ -280,20 +304,30 @@ function GameContent() {
     console.log('All available categories:', uniqueList.map(c => ({ id: c.id, name: c.name })));
 
     let selectedCategories: any[];
-    
+    let boardSeedIds: number[] = [];
+
     try {
       // Use database to store shuffled category IDs for randomness across games
       const { data: settings } = await supabase.from('app_settings').select('category_shuffle_ids').maybeSingle();
       
       if (currentRound === 'jeopardy') {
-        // Generate new random shuffle for new game
-        const shuffledIds = [...uniqueList].sort(() => Math.random() - 0.5).map(c => c.id);
-        // Save to database
-        await supabase.from('app_settings').upsert({ 
-          id: 1, 
-          category_shuffle_ids: shuffledIds 
-        }, { onConflict: 'id' });
-        console.log('Jeopardy: Generated new shuffle and saved to DB:', shuffledIds);
+        // Reuse the stored shuffle so reloading the board keeps the same categories
+        // and clues; a new shuffle is only generated for a fresh game (admin launch
+        // and reset both clear category_shuffle_ids).
+        const savedIds: number[] = settings?.category_shuffle_ids || [];
+        const savedAreValid = savedIds.length > 0 && savedIds.some(id => uniqueList.some(c => c.id === id));
+        const shuffledIds = savedAreValid
+          ? savedIds
+          : [...uniqueList].sort(() => Math.random() - 0.5).map(c => c.id);
+
+        if (!savedAreValid) {
+          await supabase.from('app_settings').upsert({
+            id: 1,
+            category_shuffle_ids: shuffledIds
+          }, { onConflict: 'id' });
+        }
+        boardSeedIds = shuffledIds;
+        console.log('Jeopardy: Using shuffle', shuffledIds, savedAreValid ? '(restored)' : '(new)');
         
         // Reconstruct categories from shuffled IDs
         const categoryPairs = shuffledIds
@@ -311,6 +345,7 @@ function GameContent() {
       } else {
         // Double Jeopardy: use saved shuffle from database
         const shuffledIds: number[] = settings?.category_shuffle_ids || [];
+        boardSeedIds = shuffledIds;
         console.log('Double Jeopardy: Using saved shuffle from DB:', shuffledIds);
         
         // Reconstruct categories from shuffled IDs
@@ -361,6 +396,22 @@ function GameContent() {
     console.log('Available questions (is_answered=false):', qData?.length || 0);
     console.log('Filter applied: category_id in', catIds, 'AND is_answered=false');
 
+    // Seeded RNG so the same board (clues + daily doubles) is rebuilt on reload
+    // instead of re-rolling questions, which made clues repeat across reloads.
+    const seedSource = `${currentRound}:${(boardSeedIds.length ? boardSeedIds : selectedCategories.map(c => c.id)).join(',')}`;
+    let seed = 2166136261;
+    for (let i = 0; i < seedSource.length; i++) {
+      seed ^= seedSource.charCodeAt(i);
+      seed = Math.imul(seed, 16777619);
+    }
+    const seededRandom = () => {
+      seed |= 0;
+      seed = (seed + 0x6D2B79F5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+
     const map: { [catId: number]: { [points: number]: any | null } } = {};
     const assignedIds = new Set<number>();
 
@@ -382,8 +433,9 @@ function GameContent() {
     });
 
     // Randomly select one if multiple exist
-    const candidate = candidates.length > 0 
-      ? candidates[Math.floor(Math.random() * candidates.length)]
+    const ordered = [...candidates].sort((a: { id: number }, b: { id: number }) => a.id - b.id);
+    const candidate = ordered.length > 0
+      ? ordered[Math.floor(seededRandom() * ordered.length)]
       : null;
 
     if (candidate) {
@@ -413,8 +465,10 @@ function GameContent() {
   });
 });
 
-    const assignedQuestions = Object.values(map).flatMap(pm => Object.values(pm).filter(Boolean));
-    const shuffled = [...assignedQuestions].sort(() => Math.random() - 0.5);
+    const assignedQuestions = Object.values(map)
+      .flatMap(pm => Object.values(pm).filter(Boolean))
+      .sort((a: { id: number }, b: { id: number }) => a.id - b.id);
+    const shuffled = [...assignedQuestions].sort(() => seededRandom() - 0.5);
     const ddSet = new Set<number>(shuffled.slice(0, Math.min(2, shuffled.length)).map((q: any) => q.id));
     setDailyDoubles(ddSet);
 
@@ -437,6 +491,19 @@ function GameContent() {
     }
 
     setLoading(false);
+  }
+
+  // In turn mode the first turn must be published before the first question,
+  // otherwise the opening team also receives the next turn.
+  async function ensureCurrentTurn() {
+    const { data: gs } = await supabase.from('game_state').select('mode,current_turn_team_id').maybeSingle();
+    if (!gs || gs.mode !== 'turn' || gs.current_turn_team_id) return;
+
+    const { data: teamsData } = await supabase.from('teams').select('id').eq('approved', true).order('id', { ascending: true });
+    if (!teamsData || teamsData.length === 0) return;
+
+    await supabase.from('game_state').update({ current_turn_team_id: teamsData[0].id }).eq('id', 1);
+    setCurrentTurnTeamId(teamsData[0].id);
   }
 
   async function startFinalMentis() {
@@ -605,6 +672,10 @@ if (!finalQ) {
     const { data: subs } = await supabase.from('final_submissions').select('*').eq('final_round', finalRoundId);
     if (!subs) return;
 
+    if (finalQuestion?.id) {
+      await supabase.from('questions').update({ is_answered: true }).eq('id', finalQuestion.id);
+    }
+
     let updatedTeamsList = [...teams];
 
     for (const team of teams) {
@@ -699,11 +770,97 @@ if (!finalQ) {
       console.error('Failed to publish active question to game_state', e);
     }
 
+    try {
+      await supabase.channel('cast_categories_sync').send({
+        type: 'broadcast',
+        event: 'active_question_meta',
+        payload: {
+          questionId: question.id,
+          categoryName: categories.find(c => c.id === question.category_id)?.name ?? null,
+          points: question.points,
+          isDailyDouble: dailyDoubles.has(question.id)
+        }
+      });
+    } catch (e) {
+      console.error('Failed to broadcast active question meta', e);
+    }
+
     if (dailyDoubles.has(question.id)) {
       setIsDailyDoubleScreen(true);
-      const score = teams[activeTeamIndex]?.score || 0;
+      setReceivedWagers([]);
+      const score = wagerTeam()?.score || 0;
       setWagerAmount(String(Math.max(question.points, score)));
+      await broadcastDailyDouble(question);
     } else setIsDailyDoubleScreen(false);
+  }
+
+  function wagerTeam() {
+    const eligibleId = gameMode === 'buzzer'
+      ? teams.find(t => t.name === buzzerWinnerName)?.id ?? null
+      : currentTurnTeamId;
+    return teams.find(t => t.id === eligibleId) ?? teams[activeTeamIndex];
+  }
+
+  async function broadcastDailyDouble(question: { id: number; points: number; clue?: string }) {
+    const eligibleTeamId = wagerTeam()?.id ?? null;
+    try {
+      await supabase.channel(DAILY_DOUBLE_CHANNEL).send({
+        type: 'broadcast',
+        event: 'daily_double_start',
+        payload: {
+          questionId: question.id,
+          points: question.points,
+          eligibleTeamId,
+          eligibleTeamName: wagerTeam()?.name ?? null,
+          clue: question.clue ?? null
+        }
+      });
+    } catch (e) {
+      console.error('Failed to broadcast daily double', e);
+    }
+  }
+
+  async function endDailyDouble() {
+    try {
+      await supabase.channel(DAILY_DOUBLE_CHANNEL).send({
+        type: 'broadcast',
+        event: 'daily_double_end',
+        payload: {}
+      });
+    } catch (e) {
+      console.error('Failed to broadcast daily double end', e);
+    }
+  }
+
+  // Closes the clue with no score change (e.g. nobody buzzed) and burns the tile
+  async function cancelActiveQuestion() {
+    if (!activeQuestion) return;
+
+    await supabase.from('questions').update({ is_answered: true }).eq('id', activeQuestion.id);
+
+    try {
+      await supabase.from('game_state').update({
+        active_question_id: null,
+        question_revealed: false,
+        answer_revealed: false
+      }).eq('id', 1);
+    } catch (e) {
+      console.error('Failed to clear active question in game_state', e);
+    }
+
+    await supabase.from('buzzers').update({ active: false, winner_team_id: null }).eq('id', 1);
+    setBuzzerActive(false);
+    await endDailyDouble();
+
+    if (gameMode === 'turn') await setNextTurnInDB();
+
+    setAnsweredQuestions(prev => ({ ...prev, [activeQuestion.id]: true }));
+    setActiveQuestion(null);
+    setShowAnswer(false);
+    setIsDailyDoubleScreen(false);
+    setWagerAmount('');
+    setWagerError('');
+    setReceivedWagers([]);
   }
 
   async function revealAnswerHandler() {
@@ -811,12 +968,15 @@ if (!finalQ) {
       await setNextTurnInDB();
     }
 
+    await endDailyDouble();
+
     setAnsweredQuestions(prev => ({ ...prev, [activeQuestion.id]: true }));
     setActiveQuestion(null);
     setShowAnswer(false);
     setIsDailyDoubleScreen(false);
     setWagerAmount('');
     setWagerError('');
+    setReceivedWagers([]);
   }
 
   if (loading) {
@@ -1146,6 +1306,13 @@ if (!finalQ) {
           </form>
 
           <div className="mt-4 pt-4 border-t">
+            {gameMode === 'turn' && (
+              <div className="bg-[#0d1117] border border-[#21262d] rounded-xl p-4 text-center mb-3">
+                <div className="text-[10px] uppercase text-slate-400">Current Turn</div>
+                <div className="font-black text-amber-400 mt-1">{(teams.find(t => t.id === currentTurnTeamId)?.name ?? '—').toUpperCase()}</div>
+              </div>
+            )}
+
             <div className="bg-[#0d1117] border border-[#21262d] rounded-xl p-4 text-center">
               <div className="text-[10px] uppercase text-slate-400">First Buzzed Team</div>
               <div className="font-black text-amber-400 mt-1">{buzzerWinnerName ? buzzerWinnerName.toUpperCase() : 'NO BUZZES YET'}</div>
@@ -1167,8 +1334,27 @@ if (!finalQ) {
               <div className="space-y-6">
                 <div className="inline-flex items-center gap-2 bg-amber-400/20 text-amber-300 px-5 py-2 rounded-full text-sm font-extrabold uppercase">Daily Double!</div>
                 <h3 className="text-xl font-bold">Place Your Wager</h3>
-                <input type="number" min={5} max={Math.max(activeQuestion.points, teams[activeTeamIndex]?.score || 0)} value={wagerAmount} onChange={(e) => setWagerAmount(e.target.value)} className="w-full bg-[#1b202a] border rounded-xl px-4 py-3 text-center text-xl font-black text-amber-300" />
-                <div className="flex gap-2"><button onClick={() => { const p = parseInt(wagerAmount); const maxAllowed = Math.max(activeQuestion.points, teams[activeTeamIndex]?.score || 0); if (isNaN(p) || p < 5 || p > maxAllowed) { setWagerError(`Wager must be between 5 and ${maxAllowed}`); return; } setIsDailyDoubleScreen(false); }} className="bg-amber-400 text-slate-900 py-3 px-6 rounded-xl">Confirm</button></div>
+                <div className="text-xs text-slate-400">Waiting for {wagerTeam()?.name ?? 'the player'} to submit a wager on their buzzer, or set it here.</div>
+
+                {receivedWagers.length > 0 && (
+                  <div className="space-y-2 text-left">
+                    {receivedWagers.map(w => {
+                      const t = teams.find(tt => tt.id === w.teamId);
+                      return (
+                        <div key={w.teamId} className="flex items-center justify-between bg-[#1b202a] border border-[#293244] rounded-xl px-4 py-2">
+                          <span className="text-xs font-bold">{t?.name ?? `Team ${w.teamId}`}</span>
+                          <div className="flex items-center gap-3">
+                            <span className="text-amber-300 font-black">{w.wager}</span>
+                            <button onClick={() => setWagerAmount(String(w.wager))} className="text-[10px] uppercase text-slate-300 border border-[#293244] rounded-lg px-2 py-1">Use</button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                <input type="number" min={5} max={Math.max(activeQuestion.points, wagerTeam()?.score || 0)} value={wagerAmount} onChange={(e) => setWagerAmount(e.target.value)} className="w-full bg-[#1b202a] border rounded-xl px-4 py-3 text-center text-xl font-black text-amber-300" />
+                <div className="flex gap-2"><button onClick={() => { const p = parseInt(wagerAmount); const maxAllowed = Math.max(activeQuestion.points, wagerTeam()?.score || 0); if (isNaN(p) || p < 5 || p > maxAllowed) { setWagerError(`Wager must be between 5 and ${maxAllowed}`); return; } setIsDailyDoubleScreen(false); }} className="bg-amber-400 text-slate-900 py-3 px-6 rounded-xl">Confirm</button></div>
                 {wagerError && <div className="text-xs text-rose-400">{wagerError}</div>}
               </div>
             ) : (
@@ -1189,6 +1375,8 @@ if (!finalQ) {
                   <button onClick={() => handleScoreAdjustment(false)} className="flex-1 bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 py-3.5 rounded-xl">Incorrect</button>
                   <button onClick={() => handleScoreAdjustment(true)} className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white py-3.5 rounded-xl">Correct</button>
                 </div>
+
+                <button onClick={cancelActiveQuestion} className="w-full bg-[#1b202a] hover:bg-[#232a36] border border-[#293244] text-slate-300 text-xs font-bold py-3 rounded-xl">No Buzz — Close Without Scoring</button>
               </div>
             )}
           </div>
