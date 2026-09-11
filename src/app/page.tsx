@@ -689,21 +689,30 @@ if (!finalQ) {
     setShowAnswer(false);
     setWagerError('');
 
+    const isDD = dailyDoubles.has(question.id);
+
+    // If it's a Daily Double, keep 'daily_double'. 
+    // Otherwise, respect your current mode (e.g. keep 'turn' or 'turn_mode' if active, else default to 'buzzer')
+    const targetMode = isDD ? 'daily_double' : (gameMode === 'turn' ? 'turn' : 'buzzer');
+
     try {
       await supabase.from('game_state').update({
         active_question_id: question.id,
         question_revealed: true,
-        answer_revealed: false
+        answer_revealed: false,
+        mode: targetMode 
       }).eq('id', 1);
     } catch (e) {
       console.error('Failed to publish active question to game_state', e);
     }
 
-    if (dailyDoubles.has(question.id)) {
+    if (isDD) {
       setIsDailyDoubleScreen(true);
       const score = teams[activeTeamIndex]?.score || 0;
       setWagerAmount(String(Math.max(question.points, score)));
-    } else setIsDailyDoubleScreen(false);
+    } else {
+      setIsDailyDoubleScreen(false);
+    }
   }
 
   async function revealAnswerHandler() {
@@ -716,35 +725,41 @@ if (!finalQ) {
   }
 
   async function setNextTurnInDB() {
-    try {
-      const { count: unanswered } = await supabase.from('questions').select('*', { head: true, count: 'exact' }).eq('is_answered', false);
-      if ((unanswered ?? 0) <= 0) {
-        await supabase.from('game_state').update({ current_turn_team_id: null }).eq('id', 1);
-        return;
-      }
-
-      const { data: teamsData } = await supabase.from('teams').select('id').eq('approved', true).order('id', { ascending: true });
-      if (!teamsData || teamsData.length === 0) {
-        await supabase.from('game_state').update({ current_turn_team_id: null }).eq('id', 1);
-        return;
-      }
-      const teamIds = teamsData.map((t: any) => t.id);
-
-      const { data: gs } = await supabase.from('game_state').select('current_turn_team_id').maybeSingle();
-      const currentId = gs?.current_turn_team_id ?? null;
-
-      let nextId: number;
-      if (!currentId) nextId = teamIds[0];
-      else {
-        const idx = teamIds.indexOf(currentId);
-        nextId = idx === -1 ? teamIds[0] : teamIds[(idx + 1) % teamIds.length];
-      }
-
-      await supabase.from('game_state').update({ current_turn_team_id: nextId }).eq('id', 1);
-    } catch (err) {
-      console.error('setNextTurnInDB error', err);
+  try {
+    const { count: unanswered } = await supabase.from('questions').select('*', { head: true, count: 'exact' }).eq('is_answered', false);
+    if ((unanswered ?? 0) <= 0) {
+      await supabase.from('game_state').update({ current_turn_team_id: null }).eq('id', 1);
+      return;
     }
+
+    const { data: teamsData } = await supabase.from('teams').select('id').eq('approved', true).order('id', { ascending: true });
+    if (!teamsData || teamsData.length === 0) {
+      await supabase.from('game_state').update({ current_turn_team_id: null }).eq('id', 1);
+      return;
+    }
+    const teamIds = teamsData.map((t: any) => t.id);
+
+    const { data: gs } = await supabase.from('game_state').select('current_turn_team_id').maybeSingle();
+    const currentId = gs?.current_turn_team_id ?? null;
+
+    let nextId: number;
+    if (!currentId) {
+      nextId = teamIds[0];
+    } else {
+      const idx = teamIds.indexOf(currentId);
+      if (idx === -1) {
+        nextId = teamIds[0];
+      } else {
+        const nextIndex = (idx + 1) % teamIds.length;
+        nextId = teamIds[nextIndex];
+      }
+    }
+
+    await supabase.from('game_state').update({ current_turn_team_id: nextId }).eq('id', 1);
+  } catch (err) {
+    console.error('setNextTurnInDB error', err);
   }
+}
 
   async function handleScoreAdjustment(correct: boolean) {
     if (!activeQuestion) return;
@@ -1166,9 +1181,57 @@ if (!finalQ) {
             {isDailyDoubleScreen ? (
               <div className="space-y-6">
                 <div className="inline-flex items-center gap-2 bg-amber-400/20 text-amber-300 px-5 py-2 rounded-full text-sm font-extrabold uppercase">Daily Double!</div>
-                <h3 className="text-xl font-bold">Place Your Wager</h3>
-                <input type="number" min={5} max={Math.max(activeQuestion.points, teams[activeTeamIndex]?.score || 0)} value={wagerAmount} onChange={(e) => setWagerAmount(e.target.value)} className="w-full bg-[#1b202a] border rounded-xl px-4 py-3 text-center text-xl font-black text-amber-300" />
-                <div className="flex gap-2"><button onClick={() => { const p = parseInt(wagerAmount); const maxAllowed = Math.max(activeQuestion.points, teams[activeTeamIndex]?.score || 0); if (isNaN(p) || p < 5 || p > maxAllowed) { setWagerError(`Wager must be between 5 and ${maxAllowed}`); return; } setIsDailyDoubleScreen(false); }} className="bg-amber-400 text-slate-900 py-3 px-6 rounded-xl">Confirm</button></div>
+                
+                {(() => {
+                  // 👉 1. Check if the active team has already submitted a wager from their buzzer client
+                  const currentTeamWager = teams[activeTeamIndex]?.daily_double_wager;
+                  const hasClientWager = currentTeamWager !== null && currentTeamWager !== undefined && currentTeamWager > 0;
+                  
+
+                  return (
+                    <>
+                      <div className="text-xs text-slate-400 uppercase tracking-widest">
+                        {hasClientWager 
+                          ? `Wager Submitted by Player: ${currentTeamWager}` 
+                          : 'Enter Wager (Player has not submitted)'}
+                      </div>
+
+                      <h3 className="text-xl font-bold">Place Your Wager</h3>
+                      
+                      <input 
+                        type="number" 
+                        min={5} 
+                        max={Math.max(activeQuestion.points, teams[activeTeamIndex]?.score || 0)} 
+                        value={hasClientWager ? currentTeamWager : wagerAmount} 
+                        disabled={hasClientWager} // 👉 2. Locks host input if client submitted
+                        onChange={(e) => setWagerAmount(e.target.value)} 
+                        className="w-full bg-[#1b202a] border rounded-xl px-4 py-3 text-center text-xl font-black text-amber-300 disabled:opacity-50" 
+                      />
+                      
+                      <div className="flex gap-2 justify-center">
+                        <button 
+                          onClick={() => { 
+                            // 👉 3. Use client wager if available, otherwise validate host input
+                            const finalWager = hasClientWager ? currentTeamWager : parseInt(wagerAmount);
+                            const maxAllowed = Math.max(activeQuestion.points, teams[activeTeamIndex]?.score || 0); 
+                            
+                            if (!hasClientWager && (isNaN(finalWager) || finalWager < 5 || finalWager > maxAllowed)) { 
+                              setWagerError(`Wager must be between 5 and ${maxAllowed}`); 
+                              return; 
+                            } 
+                            
+                            setWagerAmount(String(finalWager));
+                            setIsDailyDoubleScreen(false); 
+                          }} 
+                          className="bg-amber-400 text-slate-900 py-3 px-6 rounded-xl font-bold"
+                        >
+                          Confirm & Proceed
+                        </button>
+                      </div>
+                    </>
+                  );
+                })()}
+
                 {wagerError && <div className="text-xs text-rose-400">{wagerError}</div>}
               </div>
             ) : (
@@ -1186,9 +1249,55 @@ if (!finalQ) {
                 )}
 
                 <div className="flex items-center justify-center gap-4 pt-4 border-t">
-                  <button onClick={() => handleScoreAdjustment(false)} className="flex-1 bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 py-3.5 rounded-xl">Incorrect</button>
-                  <button onClick={() => handleScoreAdjustment(true)} className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white py-3.5 rounded-xl">Correct</button>
-                </div>
+  <button 
+    onClick={() => handleScoreAdjustment(false)} 
+    className="flex-1 bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 py-3.5 rounded-xl"
+  >
+    Incorrect
+  </button>
+
+  {/* 👉 Only show Cancel button if we are in buzzer mode */}
+  {gameMode === 'buzzer' && (
+  <button 
+    onClick={async () => {
+  if (!activeQuestion) return;
+
+  const updatedAnswered = {
+    ...answeredQuestions,
+    [activeQuestion.id]: true
+  };
+
+  // 1. Update Supabase to clear active question, reset mode, and push updated answered_questions
+  await supabase.from('game_state').update({
+    active_question_id: null,
+    question_revealed: false,
+    is_question_visible: false,
+    answer_revealed: false,
+    mode: 'buzzer',
+    answered_questions: updatedAnswered
+  }).eq('id', 1);
+
+  // 2. Directly update the specific question in the 'questions' table to trigger cast screen real-time listeners
+  await supabase.from('questions').update({
+    is_answered: true
+  }).eq('id', activeQuestion.id);
+
+  setAnsweredQuestions(updatedAnswered);
+  setActiveQuestion(null); 
+}}
+    className="px-4 bg-slate-800 hover:bg-slate-700 text-slate-300 py-3.5 rounded-xl text-sm font-medium transition-colors"
+  >
+    Cancel
+  </button>
+)}
+
+  <button 
+    onClick={() => handleScoreAdjustment(true)} 
+    className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white py-3.5 rounded-xl"
+  >
+    Correct
+  </button>
+</div>
               </div>
             )}
           </div>

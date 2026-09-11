@@ -24,6 +24,7 @@ export default function BuzzerPage() {
   const [buzzerWinner, setBuzzerWinner] = useState<string | null>(null);
   const [hasBuzzed, setHasBuzzed] = useState(false);
   const [wager, setWager] = useState('');
+  const [wagerSubmitted, setWagerSubmitted] = useState(false);
   const [answer, setAnswer] = useState('');
 
   const [currentTurnName, setCurrentTurnName] = useState<string | null>(null);
@@ -204,7 +205,14 @@ export default function BuzzerPage() {
       if (!payload.new) return;
       console.debug('BUZZER: game_state event ->', payload.new);
       const gs = payload.new;
-      setRawMode(gs.mode ?? null);
+      const rawNewMode = gs.game_mode ?? gs.mode ?? null;
+      setRawMode(rawNewMode);
+
+      // 👉 Fixed: Explicitly handle the string comparison cleanly
+      if (String(rawNewMode) === 'daily_double') {
+        setWagerSubmitted(false);
+        setWager('');
+      }
       const fStarted = !!gs.final_started && !!gs.final_round;
       setFinalStarted(fStarted);
       setFinalRound(gs.final_round ?? null);
@@ -246,16 +254,9 @@ export default function BuzzerPage() {
       
       if (teamsData && teamsData.length > 0) {
         const sorted = [...teamsData].sort((a, b) => (b.score || 0) - (a.score || 0));
-        console.log('BUZZER Setting Winner States:', sorted[0]);
-        
-        // Force state updates cleanly
-        setGameWinner(null);
-        setGameEnded(false);
-        setTimeout(() => {
-          setGameWinner(sorted[0]);
-          setWinnerTeams(sorted);
-          setGameEnded(true);
-        }, 50);
+        setGameWinner(sorted[0]);
+        setWinnerTeams(sorted);
+        setGameEnded(true);
       }
     });
     winnerCh.on('broadcast', { event: 'reset_cast' }, (payload: any) => {
@@ -299,17 +300,25 @@ export default function BuzzerPage() {
     subsRef.current.push(bzCh);
 
     postCheck = setTimeout(async () => {
-      try {
-        const { data } = await supabase.from('game_state').select('*').maybeSingle();
-        console.debug('BUZZER: post-subscribe recheck game_state ->', data);
-        if (data) {
-        if (data.active_question_id && (data.question_revealed === true || data.is_question_visible === true)) { await loadQuestionById(data.active_question_id); } else { setActiveQuestion(null); setFinalQ(null); }
-          setShowAnswer(!!data.answer_revealed);
-        }
-      } catch (err) {
-        console.error('post-subscribe recheck error', err);
+  try {
+    const { data } = await supabase.from('game_state').select('*').maybeSingle();
+    console.debug('BUZZER: post-subscribe recheck game_state ->', data);
+    if (data) {
+      if (data.game_mode) {
+        setRawMode(data.game_mode); // Sync rawMode on load
       }
-    }, 500);
+      if (data.active_question_id && (data.question_revealed === true || data.is_question_visible === true)) { 
+        await loadQuestionById(data.active_question_id); 
+      } else { 
+        setActiveQuestion(null); 
+        setFinalQ(null); 
+      }
+      setShowAnswer(!!data.answer_revealed);
+    }
+  } catch (err) {
+    console.error('post-subscribe recheck error', err);
+  }
+}, 500);
 
     return () => {
       // use safe remover for each channel
@@ -358,11 +367,34 @@ export default function BuzzerPage() {
     }
   }
 
-  // submit wager / answer (final)
+  // Add this state at the top of your buzzer component if you haven't yet:
+// const [wagerSubmitted, setWagerSubmitted] = useState(false);
+
+// submit wager / answer (final / daily double)
 async function submitWager(value: string | number | null) {
-  if (!teamId || !finalRound) { alert('Final not active'); return; }
-  
+  if (!teamId) { alert('No team connected'); return; }
   const numericValue = value !== null ? Number(value) : 0;
+
+  if (effectiveMode === 'daily_double') {
+    // 1. Update the team row
+    await supabase
+      .from('teams')
+      .update({ daily_double_wager: numericValue, wager: numericValue })
+      .eq('id', teamId);
+
+    // 2. Also update game_state so the host instantly detects it globally
+    await supabase
+      .from('game_state')
+      .update({ daily_double_wager: numericValue, player_submitted: true })
+      .eq('id', 1);
+      
+    setWagerSubmitted(true);
+    return;
+  }
+
+
+  // EXISTING FINAL JEOPARDY SUBMISSION
+  if (!finalRound) { alert('Final not active'); return; }
   
   const payload = { 
     team_id: teamId as any, 
@@ -373,8 +405,8 @@ async function submitWager(value: string | number | null) {
   
   const res = await supabase.from('final_submissions').upsert(payload, { onConflict: ['team_id', 'final_round'] as any });
   console.debug('submitWager ->', res);
-  if (!res.error) { /* local update not required, subscription will pick up */ }
 }
+
 
   async function submitAnswer(text: string | null) {
   // 🛑 Prevent submission if the countdown has hit 0
@@ -407,7 +439,7 @@ async function submitWager(value: string | number | null) {
   }
 
   // decide effectiveMode for UI (respects explicit buzzer/turn mode over stale finalStarted flags)
-  const effectiveMode = rawMode === 'buzzer' ? 'buzzer' : (rawMode === 'turn' ? 'turn' : (finalStarted ? 'final' : 'buzzer'));
+  const effectiveMode = rawMode === 'buzzer' ? 'buzzer' : (rawMode === 'turn' ? 'turn' : (rawMode === 'daily_double' ? 'daily_double' : (finalStarted ? 'final' : 'buzzer')));
   console.debug('BUZZER render effectiveMode=', effectiveMode, { rawMode, finalStarted, finalRound, activeQuestionId: activeQuestion?.id, finalQId: finalQ?.id, showAnswer });
 
   // render
@@ -437,7 +469,10 @@ async function submitWager(value: string | number | null) {
               <div className="text-xs text-emerald-400 font-bold flex items-center gap-1"><CheckCircle2 className="w-4 h-4" /> Connected</div>
             </div>
 
-            {effectiveMode === 'final' ? (
+            {/* ============================================================== */}
+            {/* 1. FINAL JEOPARDY & DAILY DOUBLE MOVEMENT SCREEN              */}
+            {/* ============================================================== */}
+            {(effectiveMode === 'final' || effectiveMode === 'daily_double') && (
               <div className="space-y-4">
                 <div className="bg-[#0d1117] border border-[#21262d] p-3.5 rounded-2xl">
                   <div className="text-[10px] text-slate-400 uppercase tracking-widest">Your Score</div>
@@ -445,64 +480,80 @@ async function submitWager(value: string | number | null) {
                 </div>
 
                 <div className="bg-[#0d1117] border border-[#21262d] p-3.5 rounded-2xl">
-  <div className="text-[10px] uppercase text-slate-400">Wager (max = your score)</div>
-  <div className="mt-2 flex gap-2">
-    <input 
-      type="number" 
-      min={0} 
-      max={teamScore} 
-      value={wager} // <-- Linked to state
-      placeholder="Enter wager" 
-      onChange={(e) => setWager(e.target.value)} // <-- Updates state as you type
-      className="flex-1 bg-[#0d1117] border rounded-xl px-3 py-2 text-white" 
-    />
-    <button onClick={() => submitWager(wager)} className="px-4 py-2 bg-[#60A5FA] text-[#0d1117] rounded-md font-bold">Submit</button>
-  </div>
-</div>
+                  <div className="text-[10px] uppercase text-slate-400">
+                    {effectiveMode === 'daily_double' ? 'Daily Double Wager' : 'Wager (max = your score)'}
+                  </div>
+                  <div className="mt-2 flex gap-2">
+                    <input 
+                      type="number" 
+                      min={0} 
+                      max={teamScore} 
+                      value={wager} 
+                      disabled={wagerSubmitted} 
+                      placeholder="Enter wager" 
+                      onChange={(e) => setWager(e.target.value)} 
+                      className="flex-1 bg-[#0d1117] border border-[#21262d] rounded-xl px-3 py-2 text-white outline-none disabled:opacity-50" 
+                    />
+                    <button 
+                      onClick={() => submitWager(wager)}
+                      disabled={wagerSubmitted} 
+                      className={`px-4 py-2 rounded-xl font-bold transition-all ${
+                        wagerSubmitted 
+                          ? 'bg-slate-800 text-slate-500 cursor-not-allowed' 
+                          : 'bg-[#60A5FA] text-[#0d1117] hover:bg-blue-400'
+                      }`}
+                    >
+                      {wagerSubmitted ? 'Submitted' : 'Submit'}
+                    </button>
+                  </div>
+                </div> {/* 👉 Closed the wager wrapper div correctly */}
 
+                {/* ONLY Render Final Answer Box for Final Jeopardy mode */}
+                {effectiveMode === 'final' && (
+                  <div className="bg-[#0d1117] border border-[#21262d] p-3.5 rounded-2xl">
+                    <div className="text-[10px] uppercase text-slate-400">Final Answer</div>
+                    <div className="mt-2 flex gap-2">
+                      <input 
+                        type="text" 
+                        value={answer} 
+                        placeholder="Enter final answer" 
+                        onChange={(e) => setAnswer(e.target.value)} 
+                        className="flex-1 bg-[#0d1117] border border-[#21262d] rounded-xl px-3 py-2 text-white outline-none" 
+                      />
+                      <button onClick={() => submitAnswer(answer)} className="px-4 py-2 bg-emerald-500 text-white rounded-xl font-bold hover:bg-emerald-400 transition-all">Submit</button>
+                    </div>
+                  </div>
+                )}
 
-
-<div className="bg-[#0d1117] border border-[#21262d] p-3.5 rounded-2xl">
-  <div className="text-[10px] uppercase text-slate-400">Final Answer</div>
-  <div className="mt-2 flex gap-2">
-    <input 
-      type="text" 
-      value={answer} // <-- Linked to state
-      placeholder="Enter final answer" 
-      onChange={(e) => setAnswer(e.target.value)} // <-- Updates state as you type
-      className="flex-1 bg-[#0d1117] border rounded-xl px-3 py-2 text-white" 
-    />
-    <button onClick={() => submitAnswer(answer)} className="px-4 py-2 bg-emerald-500 text-white rounded-md font-bold">Submit</button>
-  </div>
-</div>
-
-{/* 👉 SMALL COUNTDOWN TIMER DROPPED RIGHT HERE */}
-        {countdownValue !== null && countdownValue > 0 && (
-          <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl py-2 px-4 flex items-center justify-between animate-pulse">
-            <span className="text-[10px] text-amber-400 font-bold uppercase tracking-wider">Time Remaining</span>
-            <span className="text-sm font-black font-mono text-amber-300">00:{countdownValue < 10 ? `0${countdownValue}` : countdownValue}</span>
-          </div>
-        )}
+                {/* SMALL COUNTDOWN TIMER */}
+                {countdownValue !== null && countdownValue > 0 && (
+                  <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl py-2 px-4 flex items-center justify-between animate-pulse">
+                    <span className="text-[10px] text-amber-400 font-bold uppercase tracking-wider">Time Remaining</span>
+                    <span className="text-sm font-black font-mono text-amber-300">00:{countdownValue < 10 ? `0${countdownValue}` : countdownValue}</span>
+                  </div>
+                )}
 
                 <div className="bg-[#0f1720] border border-[#2a313a] rounded-lg p-4 text-left text-sm text-slate-200">
-                  <div className="text-[10px] text-slate-400 uppercase">Final Clue</div>
+                  <div className="text-[10px] text-slate-400 uppercase">
+                    {effectiveMode === 'daily_double' ? 'Daily Double Clue' : 'Final Clue'}
+                  </div>
                   <div className="mt-2">{finalQ?.clue ?? 'Waiting for host'}</div>
                 </div>
 
                 {showTimeUpModal && (
-  <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
-    <div className="bg-[#161b22] border border-[#30363d] rounded-2xl p-6 max-w-sm w-full space-y-4 shadow-2xl text-center">
-      <div className="text-amber-400 font-bold text-lg">Time's Up!</div>
-      <p className="text-slate-300 text-sm">The countdown has expired. Submissions are now closed.</p>
-      <button 
-        onClick={() => setShowTimeUpModal(false)}
-        className="w-full py-2 bg-[#60A5FA] hover:bg-blue-400 text-[#0d1117] font-bold rounded-xl transition-all"
-      >
-        Got it
-      </button>
-    </div>
-  </div>
-)}
+                  <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+                    <div className="bg-[#161b22] border border-[#30363d] rounded-2xl p-6 max-w-sm w-full space-y-4 shadow-2xl text-center">
+                      <div className="text-amber-400 font-bold text-lg">Time's Up!</div>
+                      <p className="text-slate-300 text-sm">The countdown has expired. Submissions are now closed.</p>
+                      <button 
+                        onClick={() => setShowTimeUpModal(false)}
+                        className="w-full py-2 bg-[#60A5FA] hover:bg-blue-400 text-[#0d1117] font-bold rounded-xl transition-all"
+                      >
+                        Got it
+                      </button>
+                    </div>
+                  </div>
+                )}
 
                 {(finalQ && showAnswer) && (
                   <div className="bg-[#0f1720] border border-[#2a313a] rounded-lg p-4 text-left text-sm text-amber-200 font-black mt-2">
@@ -510,7 +561,12 @@ async function submitWager(value: string | number | null) {
                   </div>
                 )}
               </div>
-            ) : effectiveMode === 'turn' ? (
+            )}
+
+            {/* ============================================================== */}
+            {/* 2. STANDARD TURN MODE LAYOUT                                   */}
+            {/* ============================================================== */}
+            {effectiveMode === 'turn' && (
               <div className="space-y-4">
                 <div className="bg-[#0d1117] border border-[#21262d] p-3.5 rounded-2xl">
                   <div className="text-[10px] text-slate-400 uppercase tracking-widest">Active Question / Clue</div>
@@ -529,14 +585,18 @@ async function submitWager(value: string | number | null) {
                   <div className="mt-2 font-black text-lg text-slate-100">{currentTurnName ?? 'Current Team'}</div>
                 </div>
               </div>
-            ) : (
+            )}
+
+            {/* ============================================================== */}
+            {/* 3. DEFAULT BUZZER MODE LAYOUT                                  */}
+            {/* ============================================================== */}
+            {effectiveMode !== 'final' && effectiveMode !== 'daily_double' && effectiveMode !== 'turn' && (
               <div className="space-y-6">
                 <div className="bg-[#0d1117] border border-[#21262d] p-3.5 rounded-2xl mb-4 flex items-center justify-between">
                   <div className="text-xs">Team Score</div>
                   <div className="font-black text-2xl">{teamScore}</div>
                 </div>
 
-                {/* Question & Answer display added for Buzzer Mode */}
                 <div className="bg-[#0d1117] border border-[#21262d] p-3.5 rounded-2xl">
                   <div className="text-[10px] text-slate-400 uppercase tracking-widest">Active Question / Clue</div>
                   <div className="mt-3 bg-[#0f1720] border border-[#2a313a] rounded-lg p-4 text-left text-sm leading-relaxed">{activeQuestion?.clue ?? 'No active question revealed'}</div>
@@ -549,15 +609,16 @@ async function submitWager(value: string | number | null) {
                   </div>
                 )}
 
-                <div className="flex justify-center">
-                  <button onClick={handleBuzz} disabled={!buzzerActive || hasBuzzed || !!buzzerWinner} className={`w-44 h-44 rounded-full font-black ${!buzzerActive ? 'bg-slate-800 text-slate-500' : buzzerWinner ? 'bg-rose-500/20 text-rose-400' : hasBuzzed ? 'bg-emerald-500 text-slate-900' : 'bg-rose-600 text-white'}`}>
+
+                                <div className="flex justify-center mt-6">
+                  <button onClick={handleBuzz} disabled={!buzzerActive || hasBuzzed || !!buzzerWinner} className={`w-44 h-44 rounded-full font-black flex flex-col items-center justify-center ${!buzzerActive ? 'bg-slate-800 text-slate-500' : buzzerWinner ? 'bg-rose-500/20 text-rose-400' : hasBuzzed ? 'bg-emerald-500 text-slate-900' : 'bg-rose-600 text-white'}`}>
                     <Zap className="w-7 h-7 mb-1" />
                     {!buzzerActive ? 'LOCKED' : buzzerWinner ? (buzzerWinner === teamName ? 'YOU BUZZED' : 'BUZZED') : 'BUZZ!'}
                   </button>
                 </div>
                 
                 {/* First buzzed team info shown dynamically in the status tile */}
-                <div className="font-bold text-center">
+                <div className="font-bold text-center mt-4">
                   {buzzerWinner ? (
                     <span className="text-amber-400 text-lg animate-pulse">
                       🚨 {buzzerWinner} BUZZED FIRST!

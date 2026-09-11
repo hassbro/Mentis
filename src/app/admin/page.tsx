@@ -132,11 +132,19 @@ export default function AdminPage() {
     });
     safeSubscribe(gsChannel);
 
+    // teams update channel (fixes Daily Double wager lock)
+    const adminTeamsChannel = createChannel('admin_teams_wager_sync');
+    adminTeamsChannel.on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'teams' }, () => {
+      fetchTeams();
+    });
+    safeSubscribe(adminTeamsChannel);
+
     // cleanup
     return () => {
       safeRemoveChannel(approvalChannel);
       safeRemoveChannel(buzzerChannel);
       safeRemoveChannel(gsChannel);
+      safeRemoveChannel(adminTeamsChannel); // 👉 Added here
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -262,35 +270,43 @@ export default function AdminPage() {
 
   // deterministic round-robin advance helper (used by host after scoring)
   async function setNextTurnInDB() {
-    try {
-      const { count: unanswered } = await supabase.from('questions').select('*', { head: true, count: 'exact' }).eq('is_answered', false);
-      if ((unanswered ?? 0) <= 0) {
-        await supabase.from('game_state').update({ current_turn_team_id: null }).eq('id', 1);
-        return;
-      }
-
-      const { data: teamsData } = await supabase.from('teams').select('id').eq('approved', true).order('id', { ascending: true });
-      if (!teamsData || teamsData.length === 0) {
-        await supabase.from('game_state').update({ current_turn_team_id: null }).eq('id', 1);
-        return;
-      }
-      const teamIds = teamsData.map((t: any) => t.id);
-
-      const { data: gs } = await supabase.from('game_state').select('current_turn_team_id').maybeSingle();
-      const currentId = gs?.current_turn_team_id ?? null;
-
-      let nextId: number;
-      if (!currentId) nextId = teamIds[0];
-      else {
-        const idx = teamIds.indexOf(currentId);
-        nextId = idx === -1 ? teamIds[0] : teamIds[(idx + 1) % teamIds.length];
-      }
-
-      await supabase.from('game_state').update({ current_turn_team_id: nextId }).eq('id', 1);
-    } catch (err) {
-      console.error('setNextTurnInDB error', err);
+  try {
+    const { count: unanswered } = await supabase.from('questions').select('*', { head: true, count: 'exact' }).eq('is_answered', false);
+    if ((unanswered ?? 0) <= 0) {
+      await supabase.from('game_state').update({ current_turn_team_id: null }).eq('id', 1);
+      return;
     }
+
+    const { data: teamsData } = await supabase.from('teams').select('id').eq('approved', true).order('id', { ascending: true });
+    if (!teamsData || teamsData.length === 0) {
+      await supabase.from('game_state').update({ current_turn_team_id: null }).eq('id', 1);
+      return;
+    }
+    const teamIds = teamsData.map((t: any) => t.id);
+
+    const { data: gs } = await supabase.from('game_state').select('current_turn_team_id').maybeSingle();
+    const currentId = gs?.current_turn_team_id ?? null;
+
+    let nextId: number;
+    if (!currentId) {
+      // If no turn is set yet, start with the very first approved team
+      nextId = teamIds[0];
+    } else {
+      const idx = teamIds.indexOf(currentId);
+      // If current team is found, advance to the next index; otherwise default to start
+      if (idx === -1) {
+        nextId = teamIds[0];
+      } else {
+        const nextIndex = (idx + 1) % teamIds.length;
+        nextId = teamIds[nextIndex];
+      }
+    }
+
+    await supabase.from('game_state').update({ current_turn_team_id: nextId }).eq('id', 1);
+  } catch (err) {
+    console.error('setNextTurnInDB error', err);
   }
+}
 
   // Open host board helper: clear any active question then open in new tab
   async function openHostBoard(path: string) {

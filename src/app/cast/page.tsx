@@ -37,14 +37,18 @@ export default function CastPage() {
       setOriginUrl(window.location.origin);
     }
 
+    
+
     async function init() {
       const { data: gs } = await supabase.from('game_state').select('*').maybeSingle();
       if (!isMountedRef.current) return;
       if (gs) {
         setGameState(gs);
         if (gs.active_question_id) {
-          loadActiveQuestion(gs.active_question_id);
-        }
+        loadActiveQuestion(gs.active_question_id);
+      } else {
+        setActiveQuestion(null); // 👉 This forces the placard to drop instantly when canceled
+      }
         if (gs.show_winner || gs.winner_revealed || gs.game_over || gs.scores_calculated || gs.winner_screen) {
           setShowWinnerModal(true);
         }
@@ -114,22 +118,31 @@ setGameWinner(null);
     channel.subscribe();
 
     // Real-time listener for question tile updates
+    // Real-time listener for question tile updates
+    // Real-time listener for question tile updates
     const questionsCh = supabase.channel(`cast_questions_${Date.now()}`);
+
     questionsCh.on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'questions' }, (payload: any) => {
       const updatedQ = payload.new;
-      if (!isMountedRef.current) return;
+      
       setQuestionsMap(prev => {
         const next = { ...prev };
-        if (next[updatedQ.category_id]) {
-          Object.keys(next[updatedQ.category_id]).forEach(pt => {
-            if (next[updatedQ.category_id][Number(pt)]?.id === updatedQ.id) {
-              next[updatedQ.category_id][Number(pt)] = {
-                ...next[updatedQ.category_id][Number(pt)],
-                is_answered: updatedQ.is_answered
-              };
-            }
-          });
-        }
+        Object.keys(next).forEach(key => {
+          const catId = Number(key);
+          if (next[catId]) {
+            // Create a fresh object copy for the category to trigger React reactivity
+            next[catId] = { ...next[catId] };
+            Object.keys(next[catId]).forEach(ptKey => {
+              const pt = Number(ptKey);
+              if (next[catId][pt]?.id === updatedQ.id) {
+                next[catId][pt] = {
+                  ...next[catId][pt],
+                  is_answered: updatedQ.is_answered
+                };
+              }
+            });
+          }
+        });
         return next;
       });
     }).subscribe();
@@ -211,8 +224,8 @@ setGameWinner(null);
   }
 
   const isGameStarted = categories.length > 0 && !showQR;
-  const hasActiveQuestion = gameState?.active_question_id && activeQuestion;
-  const isQuestionVisible = (gameState?.is_question_visible === true || gameState?.question_revealed === true) && hasActiveQuestion;
+  const hasActiveQuestion = Boolean(gameState?.active_question_id && activeQuestion);
+  const isQuestionVisible = (gameState?.is_question_visible === true || gameState?.question_revealed === true) && hasActiveQuestion && (gameState.active_question_id === activeQuestion.id);
 
   // Final Mentis clue is strictly hidden until the host reveals it via active question
   const isFinalClueRevealed = isFinalActive && isQuestionVisible;
@@ -323,12 +336,20 @@ setGameWinner(null);
                 </div>
               )}
             </div>
-          ) : isQuestionVisible ? (
+          ) : isQuestionVisible && activeQuestion ? (
             <div className="w-full bg-slate-900/90 border border-slate-700 rounded-3xl p-12 shadow-2xl text-center space-y-6">
               <div className="text-amber-400 font-bold text-sm uppercase tracking-widest">
                 Active Clue ({activeQuestion.points} Points)
               </div>
 
+              {/* Daily Double Indicator Badge */}
+              {gameState?.mode === 'daily_double' && (
+                <div className="inline-block bg-amber-500/20 border border-amber-500/50 text-amber-300 px-5 py-1.5 rounded-full text-sm font-extrabold tracking-widest uppercase animate-pulse">
+                  ⭐ DAILY DOUBLE ⭐
+                </div>
+              )}
+
+              {/* Rendered ONCE cleanly */}
               <div className="text-3xl font-extrabold text-slate-100 leading-relaxed">
                 {activeQuestion.clue}
               </div>
@@ -352,6 +373,7 @@ setGameWinner(null);
               )}
             </div>
           ) : (
+            // Falls back immediately to the main grid when canceled
             <div className="w-full grid grid-cols-5 gap-3 items-start">
               {categories.map((cat: any) => (
                 <div key={cat.id} className="flex flex-col space-y-2 w-full">
@@ -362,22 +384,23 @@ setGameWinner(null);
                   </div>
 
                   {boardPoints.map((pt) => {
-                    const q = questionsMap[cat.id]?.[pt];
-                    const isAnswered = q?.is_answered === true;
+  const q = questionsMap[cat.id]?.[pt];
+  // Checks if the question is marked as answered/canceled
+  const isAnswered = q?.is_answered === true;
 
-                    return (
-                      <div
-                        key={pt}
-                        className={`w-full h-16 rounded-xl flex items-center justify-center font-black text-xl border transition-all ${
-                          isAnswered
-                            ? 'bg-slate-900/20 border-slate-800/40 text-slate-700'
-                            : 'bg-slate-900/60 border-slate-800 text-amber-400 shadow'
-                        }`}
-                      >
-                        {isAnswered ? '—' : `$${pt}`}
-                      </div>
-                    );
-                  })}
+  return (
+    <div
+      key={pt}
+      className={`w-full h-16 rounded-xl flex items-center justify-center font-black text-xl border transition-all ${
+        isAnswered
+          ? 'bg-slate-900/25 border-slate-800/40 text-slate-600 opacity-50'
+          : 'bg-slate-900/60 border-slate-700/80 text-amber-400 shadow-md'
+      }`}
+    >
+      {isAnswered ? '—' : `$${pt}`}
+    </div>
+  );
+})}
                 </div>
               ))}
             </div>
