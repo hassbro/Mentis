@@ -15,6 +15,7 @@ export default function CastPage() {
   const [currentTurnTeamId, setCurrentTurnTeamId] = useState<number | null>(null);
   const currentTeam = teams.find((t: any) => t.id === currentTurnTeamId);
   const currentTurnName = currentTeam ? currentTeam.name : null;
+  const [isElectron, setIsElectron] = useState(false);
   
   const [showWinnerModal, setShowWinnerModal] = useState(false);
   const [isFinalActive, setIsFinalActive] = useState(false);
@@ -40,22 +41,19 @@ export default function CastPage() {
     if (typeof window !== 'undefined') {
       setOriginUrl(window.location.origin);
       
-      // Auto-move window to external display if available (Electron environment)
-      if (window.electronAPI && window.electronAPI.moveToExternalDisplay) {
+      // Check if running in Electron environment with display API
+      if ((window as any).electronAPI?.moveToExternalDisplay) {
+        setIsElectron(true);
         console.log('CAST: Attempting to move to external display');
-        window.electronAPI.moveToExternalDisplay();
+        (window as any).electronAPI.moveToExternalDisplay();
       }
     }
-
     
-
     async function init() {
       const { data: gs } = await supabase.from('game_state').select('*').maybeSingle();
       if (!isMountedRef.current) return;
       if (gs) {
         setGameState(gs);
-        
-        // 👉 ADD THESE TWO LINES TO SYNC INITIAL LOAD STATE:
         if (gs.game_mode) setGameMode(gs.game_mode);
         if (gs.current_turn_team_id !== undefined) setCurrentTurnTeamId(gs.current_turn_team_id);
 
@@ -76,16 +74,14 @@ export default function CastPage() {
 
     init();
 
-    // 👉 Host Broadcast Listeners
     const channel = supabase.channel('cast_categories_sync');
     
     channel.on('broadcast', { event: 'categories_update' }, (payload: any) => {
       if (payload.payload && isMountedRef.current) {
-        console.log('CAST: Received categories update:', payload.payload);
         setCategories(payload.payload.categories || []);
         setQuestionsMap(payload.payload.questionsMap || {});
         setShowQR(false); 
-        setGameEnded(false); // Reset game ended when new board loads
+        setGameEnded(false);
       }
     });
 
@@ -95,7 +91,6 @@ export default function CastPage() {
       }
     });
 
-    // Listen for game mode and turn updates via broadcast
     channel.on('broadcast', { event: 'game_state_update' }, (payload: any) => {
       if (payload.payload && isMountedRef.current) {
         if (payload.payload.gameMode) {
@@ -107,14 +102,12 @@ export default function CastPage() {
       }
     });
 
-    // Your existing buzzer winner broadcast listener
     channel.on('broadcast', { event: 'buzzer_winner_update' }, (payload: any) => {
       if (payload.payload && isMountedRef.current) {
         setBuzzerWinnerName(payload.payload.winnerName);
       }
     });
 
-    // Listen for game mode and turn updates from the host
     channel.on('broadcast', { event: 'game_mode_turn_update' }, (payload: any) => {
       if (payload.payload && isMountedRef.current) {
         if (payload.payload.gameMode !== undefined) {
@@ -127,20 +120,12 @@ export default function CastPage() {
     });
 
     channel.on('broadcast', { event: 'game_winner' }, (payload: any) => {
-      console.log('=== CAST PAGE WINNER DEBUG ===');
-      console.log('Cast page received game winner event:', payload);
-      console.log('Payload:', payload.payload);
       if (payload.payload && isMountedRef.current) {
-        console.log('Setting game winner:', payload.payload.winner);
-        console.log('Setting teams:', payload.payload.teams);
-        console.log('Setting game ended:', payload.payload.gameEnded);
         setGameWinner(payload.payload.winner);
         setTeams(payload.payload.teams || []);
         setGameEnded(payload.payload.gameEnded || true);
         setShowQR(false);
-        // Also update game state to ensure winner screen is shown
-        setGameState((prev: any) => ({ ...(prev || {}), game_over: true, winner_screen: true }));      } else {
-        console.log('Payload or isMountedRef.current is falsy');
+        setGameState((prev: any) => ({ ...(prev || {}), game_over: true, winner_screen: true }));
       }
     });
 
@@ -157,33 +142,27 @@ export default function CastPage() {
     });
 
     channel.on('broadcast', { event: 'reset_cast' }, (payload: any) => {
-if (payload.payload && isMountedRef.current) {
-setShowQR(payload.payload.showQR);
-setCategories([]);
-setQuestionsMap({});
-setShowWinnerModal(false);
-setIsFinalActive(false);
-setActiveQuestion(null);
-setGameWinner(null);
-}
-});
+      if (payload.payload && isMountedRef.current) {
+        setShowQR(payload.payload.showQR);
+        setCategories([]);
+        setQuestionsMap({});
+        setShowWinnerModal(false);
+        setIsFinalActive(false);
+        setActiveQuestion(null);
+        setGameWinner(null);
+      }
+    });
 
     channel.subscribe();
 
-    // Real-time listener for question tile updates
-    // Real-time listener for question tile updates
-    // Real-time listener for question tile updates
     const questionsCh = supabase.channel(`cast_questions_${Date.now()}`);
-
     questionsCh.on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'questions' }, (payload: any) => {
       const updatedQ = payload.new;
-      
       setQuestionsMap(prev => {
         const next = { ...prev };
         Object.keys(next).forEach(key => {
           const catId = Number(key);
           if (next[catId]) {
-            // Create a fresh object copy for the category to trigger React reactivity
             next[catId] = { ...next[catId] };
             Object.keys(next[catId]).forEach(ptKey => {
               const pt = Number(ptKey);
@@ -200,7 +179,6 @@ setGameWinner(null);
       });
     }).subscribe();
 
-    // Real-time listener for game_state changes
     const gsCh = supabase.channel(`cast_gamestate_${Date.now()}`);
     gsCh.on('postgres_changes', { event: '*', schema: 'public', table: 'game_state' }, async (payload: any) => {
       if (!payload.new || !isMountedRef.current) return;
@@ -210,11 +188,9 @@ setGameWinner(null);
       if (gs.show_winner || gs.winner_revealed || gs.game_over || gs.scores_calculated || gs.winner_screen) {
         setShowWinnerModal(true);
       }
-
       if (gs.final_round || gs.is_final_round || gs.final_started || gs.round === 'final') {
         setIsFinalActive(true);
       }
-
       if (gs.active_question_id) {
         loadActiveQuestion(gs.active_question_id);
       } else {
@@ -222,17 +198,13 @@ setGameWinner(null);
       }
     }).subscribe();
 
-    // Real-time listener for buzzers & game state
     const bzCh = supabase.channel(`cast_buzzers_${Date.now()}`);
     bzCh.on('postgres_changes', { event: '*', schema: 'public', table: 'buzzers' }, async (payload: any) => {
       const b = payload.new;
       if (!b || !isMountedRef.current) return;
-
-      // Update game mode and turn team ID if present in the payload
       if (b.game_mode) setGameMode(b.game_mode);
       if (b.current_turn_team_id !== undefined) setCurrentTurnTeamId(b.current_turn_team_id);
 
-      // Handle buzzer winner
       if (b.winner_team_id) {
         const { data: t } = await supabase.from('teams').select('name').eq('id', b.winner_team_id).maybeSingle();
         setBuzzerWinnerName(t?.name ?? null);
@@ -241,13 +213,11 @@ setGameWinner(null);
       }
     }).subscribe();
 
-    // Real-time listener for teams score updates
     const teamCh = supabase.channel(`cast_teams_${Date.now()}`);
     teamCh.on('postgres_changes', { event: '*', schema: 'public', table: 'teams' }, () => {
       fetchTeams();
     }).subscribe();
 
-    // Polling backup
     const pollInterval = setInterval(async () => {
       const { data: gs } = await supabase.from('game_state').select('*').maybeSingle();
       if (gs && isMountedRef.current) {
@@ -282,11 +252,19 @@ setGameWinner(null);
     if (data && isMountedRef.current) setActiveQuestion(data);
   }
 
+  // Handler for manual external display button
+  const handleMoveToExternalDisplay = () => {
+    const electron = (window as any).electronAPI;
+    if (electron && electron.moveToExternalDisplay) {
+      console.log('CAST: Manually triggering move to external display');
+      electron.moveToExternalDisplay();
+    }
+  };
+
   const isGameStarted = categories.length > 0 && !showQR;
   const hasActiveQuestion = Boolean(gameState?.active_question_id && activeQuestion);
   const isQuestionVisible = (gameState?.is_question_visible === true || gameState?.question_revealed === true) && hasActiveQuestion && (gameState.active_question_id === activeQuestion.id);
 
-  // Final Mentis clue is strictly hidden until the host reveals it via active question
   const isFinalClueRevealed = isFinalActive && isQuestionVisible;
 
   const sortedTeamsForWinner = [...teams].sort((a, b) => (b.score || 0) - (a.score || 0));
@@ -301,34 +279,28 @@ setGameWinner(null);
     gameState?.scores_calculated === true ||
     gameState?.winner_screen === true;
 
-  // Use broadcast winner if available, otherwise fall back to winnerTeam from gameState
   const displayWinner = gameWinner || winnerTeam;
   const displayTeams = teams.length > 0 ? teams : (gameWinner ? [{ ...gameWinner, id: 1 }] : []);
 
-  console.log('=== CAST PAGE RENDER DEBUG ===');
-  console.log('gameEnded:', gameEnded);
-  console.log('showWinnerModal:', showWinnerModal);
-  console.log('gameWinner:', gameWinner);
-  console.log('winnerTeam:', winnerTeam);
-  console.log('displayWinner:', displayWinner);
-  console.log('isWinnerScreenActive:', isWinnerScreenActive);
-  console.log('teams.length:', teams.length);
-  console.log('displayTeams.length:', displayTeams.length);
-
   const currentTimer = gameState?.timer !== undefined ? gameState.timer : gameState?.countdown;
   
-  // Calculate Final Mentis countdown
   const finalCountdown = gameState?.final_countdown_expires_at 
     ? Math.max(0, Math.ceil((new Date(gameState.final_countdown_expires_at).getTime() - Date.now()) / 1000))
     : null;
 
-    console.log('--- CAST RENDER DEBUG ---');
-console.log('gameMode:', gameMode);
-console.log('currentTurnTeamId:', currentTurnTeamId);
-console.log('currentTurnName:', currentTurnName);
-
   return (
     <main className="min-h-screen bg-[#0b0f19] text-white p-6 flex flex-col justify-between select-none relative">
+      {/* Manual External Display Button (Only shows if running in Electron) */}
+      {isElectron && (
+        <button
+          onClick={handleMoveToExternalDisplay}
+          className="absolute top-6 right-6 z-50 bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 hover:text-white text-xs font-medium px-3 py-1.5 rounded-lg border border-zinc-700 backdrop-blur-sm shadow-lg transition-all"
+          title="Move this window to an external monitor or projector"
+        >
+          🖥️ Move to External Display
+        </button>
+      )}
+
       {/* Top Header */}
       <header className="flex justify-between items-center border-b border-slate-800 pb-4 mb-6">
         <div className="flex items-center space-x-3">
@@ -404,22 +376,19 @@ console.log('currentTurnName:', currentTurnName);
             <div className="w-full bg-slate-900/90 border border-slate-700 rounded-3xl p-12 shadow-2xl text-center space-y-6">
               <div className="text-amber-400 font-bold text-sm uppercase tracking-widest">
                 Active Clue ({(() => {
-                  // Calculate display points based on board type
                   const points = activeQuestion.points || 0;
-                  const boardPoints = Array.from(new Set(Object.values(questionsMap).flatMap(Object.keys).map(Number)));
-                  const isDouble = boardPoints.includes(2000);
+                  const boardPointsList = Array.from(new Set(Object.values(questionsMap).flatMap(Object.keys).map(Number)));
+                  const isDouble = boardPointsList.includes(2000);
                   return isDouble ? points * 2 : points;
                 })()} Points)
               </div>
 
-              {/* Daily Double Indicator Badge */}
               {gameState?.mode === 'daily_double' && (
                 <div className="inline-block bg-amber-500/20 border border-amber-500/50 text-amber-300 px-5 py-1.5 rounded-full text-sm font-extrabold tracking-widest uppercase animate-pulse">
                   ⭐ DAILY DOUBLE ⭐
                 </div>
               )}
 
-              {/* Rendered ONCE cleanly */}
               <div className="text-3xl font-extrabold text-slate-100 leading-relaxed">
                 {activeQuestion.clue}
               </div>
@@ -435,7 +404,6 @@ console.log('currentTurnName:', currentTurnName);
                   <div className="text-xs uppercase text-emerald-400 font-bold">
                     Answer
                   </div>
-
                   <div className="text-xl font-black text-emerald-300 mt-1">
                     {activeQuestion.answer}
                   </div>
@@ -443,7 +411,6 @@ console.log('currentTurnName:', currentTurnName);
               )}
             </div>
           ) : (
-            // Falls back immediately to the main grid when canceled
             <div className="w-full grid grid-cols-5 gap-3 items-start">
               {categories.map((cat: any) => (
                 <div key={cat.id} className="flex flex-col space-y-2 w-full">
@@ -454,23 +421,22 @@ console.log('currentTurnName:', currentTurnName);
                   </div>
 
                   {boardPoints.map((pt) => {
-  const q = questionsMap[cat.id]?.[pt];
-  // Checks if the question is marked as answered/canceled
-  const isAnswered = q?.is_answered === true;
+                    const q = questionsMap[cat.id]?.[pt];
+                    const isAnswered = q?.is_answered === true;
 
-  return (
-    <div
-      key={pt}
-      className={`w-full h-16 rounded-xl flex items-center justify-center font-black text-xl border transition-all ${
-        isAnswered
-          ? 'bg-slate-900/25 border-slate-800/40 text-slate-600 opacity-50'
-          : 'bg-slate-900/60 border-slate-700/80 text-amber-400 shadow-md'
-      }`}
-    >
-      {isAnswered ? '—' : `${pt}`}
-    </div>
-  );
-})}
+                    return (
+                      <div
+                        key={pt}
+                        className={`w-full h-16 rounded-xl flex items-center justify-center font-black text-xl border transition-all ${
+                          isAnswered
+                            ? 'bg-slate-900/25 border-slate-800/40 text-slate-600 opacity-50'
+                            : 'bg-slate-900/60 border-slate-700/80 text-amber-400 shadow-md'
+                        }`}
+                      >
+                        {isAnswered ? '—' : `${pt}`}
+                      </div>
+                    );
+                  })}
                 </div>
               ))}
             </div>
@@ -502,26 +468,26 @@ console.log('currentTurnName:', currentTurnName);
           </div>
 
           <div className="bg-[#0d1117] border border-[#21262d] rounded-xl p-4 text-center shadow-lg">
-  {gameMode === 'turn' ? (
-    <>
-      <div className="text-[10px] uppercase tracking-wider text-sky-400 font-bold">Current Turn</div>
-      <div className="font-black text-white mt-1.5 text-sm tracking-wide">
-        {currentTurnName ? currentTurnName.toUpperCase() : 'WAITING FOR TURN'}
-      </div>
-    </>
-  ) : (
-    <>
-      <div className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">First Buzzed Team</div>
-      <div className="font-black text-amber-400 mt-1.5 text-sm tracking-wide">
-        {buzzerWinnerName ? `${buzzerWinnerName.toUpperCase()} BUZZED FIRST!` : 'NO BUZZES YET'}
-      </div>
-    </>
-  )}
-</div>
+            {gameMode === 'turn' ? (
+              <>
+                <div className="text-[10px] uppercase tracking-wider text-sky-400 font-bold">Current Turn</div>
+                <div className="font-black text-white mt-1.5 text-sm tracking-wide">
+                  {currentTurnName ? currentTurnName.toUpperCase() : 'WAITING FOR TURN'}
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">First Buzzed Team</div>
+                <div className="font-black text-amber-400 mt-1.5 text-sm tracking-wide">
+                  {buzzerWinnerName ? `${buzzerWinnerName.toUpperCase()} BUZZED FIRST!` : 'NO BUZZES YET'}
+                </div>
+              </>
+            )}
+          </div>
         </aside>
       </div>
 
-      {/* Grand Champion Winner Modal Overlay (Highest z-index forced display) */}
+      {/* Grand Champion Winner Modal Overlay */}
       {isWinnerScreenActive && displayWinner && (
         <div className="fixed inset-0 bg-slate-950/95 backdrop-blur-lg flex items-center justify-center p-4 z-[99999]">
           <div className="bg-[#161b22] border-2 border-amber-500/50 max-w-xl w-full p-8 rounded-3xl shadow-2xl text-center space-y-6 animate-fade-in">

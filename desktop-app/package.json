@@ -5,11 +5,11 @@
   "scripts": {
     "start": "electron .",
     "build:win": "electron-builder --win --x64",
-    "build:mac": "electron-builder --mac",
+    "build:mac": "electron-builder --mac && codesign --force --deep -s - dist/mac-arm64/Buzzer\\ Admin\\ Controller.app && xattr -c dist/mac-arm64/Buzzer\\ Admin\\ Controller.app",
     "build:all": "electron-builder --win --mac --x64"
   },
   "devDependencies": {
-    "electron": "^31.0.0",
+    "electron": "^41.7.1",
     "electron-builder": "^24.13.3"
   },
   "build": {
@@ -28,5 +28,8 @@
       ],
       "category": "public.app-category.utilities"
     }
+  },
+  "allowScripts": {
+    "electron@31.7.7": true
   }
 }

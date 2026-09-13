@@ -1,6 +1,8 @@
-// Add this at the very top of your main Electron process file
+const { app, BrowserWindow, screen, ipcMain } = require('electron');
+const path = require('path');
+
+// Call appendSwitch AFTER app is required
 app.commandLine.appendSwitch('ignore-certificate-errors');
-const { app, BrowserWindow, screen } = require('electron');
 
 let adminWindow = null;
 let castWindow = null;
@@ -24,7 +26,7 @@ function createWindow() {
       contextIsolation: true,
     }
   });
-  adminWindow.loadURL('https://mentis-amber.vercel.app/admin');
+  adminWindow.loadURL('https://mentis-git-main-hassbro.vercel.app/admin');
 
   // 2. CAST / GAME BOARD WINDOW (Opens automatically in fullscreen on the TV/external monitor)
   castWindow = new BrowserWindow({
@@ -37,30 +39,40 @@ function createWindow() {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
+      preload: path.join(__dirname, 'preload.js')
     }
   });
   castWindow.loadURL('https://mentis-amber.vercel.app/cast');
 }
 
 function moveCastWindowToExternalDisplay() {
-  if (!castWindow) return;
+  if (!castWindow || castWindow.isDestroyed()) return;
   
   const displays = screen.getAllDisplays();
-  const externalDisplay = displays.find((display) => display.id !== screen.getPrimaryDisplay().id);
+  const primaryDisplay = screen.getPrimaryDisplay();
+  
+  // Find a true external display (ignoring mirrored duplicates if possible)
+  const externalDisplay = displays.find((display) => display.id !== primaryDisplay.id);
   
   if (externalDisplay) {
-    console.log('External display detected, moving cast window to external screen');
+    console.log('External display detected, moving cast window to external screen:', externalDisplay.id);
     castWindow.setPosition(externalDisplay.bounds.x, externalDisplay.bounds.y);
     castWindow.setSize(externalDisplay.bounds.width, externalDisplay.bounds.height);
     castWindow.setFullScreen(true);
   } else {
-    console.log('No external display detected, keeping cast window on primary screen');
-    const primaryDisplay = screen.getPrimaryDisplay();
-    castWindow.setPosition(primaryDisplay.bounds.x + 100, primaryDisplay.bounds.y + 100);
-    castWindow.setSize(800, 600);
+    console.log('No external display detected (or screens are mirrored), keeping cast window on primary screen');
+    castWindow.setPosition(primaryDisplay.bounds.x + 50, primaryDisplay.bounds.y + 50);
+    castWindow.setSize(1200, 800);
     castWindow.setFullScreen(false);
   }
 }
+
+
+// IPC handler for cast page to request moving to external display
+ipcMain.handle('move-to-external-display', () => {
+  moveCastWindowToExternalDisplay();
+  return { success: true };
+});
 
 app.whenReady().then(() => {
   createWindow();

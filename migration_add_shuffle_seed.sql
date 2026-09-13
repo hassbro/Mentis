@@ -1,5 +1,10 @@
--- Add jeopardy_category_ids column to app_settings table
-ALTER TABLE app_settings
-ADD COLUMN IF NOT EXISTS jeopardy_category_ids INTEGER[] DEFAULT ARRAY[]::INTEGER[];
+-- Ensure the table exists first
+CREATE TABLE IF NOT EXISTS app_settings (
+    id SERIAL PRIMARY KEY
+);
 
-COMMENT ON COLUMN app_settings.jeopardy_category_ids IS 'Stores the category IDs selected for Jeopardy round to prevent repetition in Double Jeopardy';
+-- Add the column safely
+ALTER TABLE app_settings
+ADD COLUMN IF NOT EXISTS category_shuffle_ids INTEGER[] DEFAULT ARRAY[]::INTEGER[];
+
+COMMENT ON COLUMN app_settings.category_shuffle_ids IS 'Stores the shuffled order of category IDs for random category selection across games while ensuring no repetition between Jeopardy and Double Jeopardy';

@@ -696,7 +696,6 @@ export default function AdminPage() {
       {currentTurnTeamId 
         ? teams.find((t: any) => String(t.id) === String(currentTurnTeamId))?.name || `Team ID: ${currentTurnTeamId}`
         : 'No team selected'}
-        <div className="text-xs text-zinc-500 mt-1">Debug ID: {String(currentTurnTeamId)} | Teams Loaded: {teams.length}</div>
     </div>
   </div>
 </div>
