@@ -260,53 +260,34 @@ export default function AdminPage() {
     const chosen = candidates[Math.floor(Math.random() * candidates.length)];
     const newHistory = [...history.filter(Boolean), chosen];
 
-    const { error } = await supabase.from('game_state').update({ current_turn_team_id: chosen, turn_history: newHistory }).eq('id', 1);
-    if (error) showNotification(`Failed to set next turn: ${error.message}`, 'error');
-    else {
+    // 👉 1. Include game_mode: 'turn' in the admin panel's database update
+    const { error } = await supabase.from('game_state').update({ 
+      current_turn_team_id: chosen, 
+      turn_history: newHistory,
+      game_mode: 'turn' 
+    }).eq('id', 1);
+    
+    if (error) {
+      showNotification(`Failed to set next turn: ${error.message}`, 'error');
+    } else {
       const chosenTeam = teamsData.find(t => t.id === chosen);
       showNotification(`Next turn: ${chosenTeam ? chosenTeam.name : chosen}`, 'success');
-    }
-  }
 
-  // deterministic round-robin advance helper (used by host after scoring)
-  async function setNextTurnInDB() {
-  try {
-    const { count: unanswered } = await supabase.from('questions').select('*', { head: true, count: 'exact' }).eq('is_answered', false);
-    if ((unanswered ?? 0) <= 0) {
-      await supabase.from('game_state').update({ current_turn_team_id: null }).eq('id', 1);
-      return;
-    }
-
-    const { data: teamsData } = await supabase.from('teams').select('id').eq('approved', true).order('id', { ascending: true });
-    if (!teamsData || teamsData.length === 0) {
-      await supabase.from('game_state').update({ current_turn_team_id: null }).eq('id', 1);
-      return;
-    }
-    const teamIds = teamsData.map((t: any) => t.id);
-
-    const { data: gs } = await supabase.from('game_state').select('current_turn_team_id').maybeSingle();
-    const currentId = gs?.current_turn_team_id ?? null;
-
-    let nextId: number;
-    if (!currentId) {
-      // If no turn is set yet, start with the very first approved team
-      nextId = teamIds[0];
-    } else {
-      const idx = teamIds.indexOf(currentId);
-      // If current team is found, advance to the next index; otherwise default to start
-      if (idx === -1) {
-        nextId = teamIds[0];
-      } else {
-        const nextIndex = (idx + 1) % teamIds.length;
-        nextId = teamIds[nextIndex];
+      // 👉 2. Broadcast gameMode: 'turn' from the admin panel so the Cast screen switches instantly
+      try {
+        await supabase.channel('cast_categories_sync').send({
+          type: 'broadcast',
+          event: 'game_mode_turn_update',
+          payload: { 
+            gameMode: 'turn',
+            currentTurnTeamId: chosen 
+          }
+        });
+      } catch (e) {
+        console.log('Turn broadcast failed:', e);
       }
     }
-
-    await supabase.from('game_state').update({ current_turn_team_id: nextId }).eq('id', 1);
-  } catch (err) {
-    console.error('setNextTurnInDB error', err);
   }
-}
 
   // Open host board helper: clear any active question then open in new tab
   async function openHostBoard(path: string) {
