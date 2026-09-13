@@ -10,6 +10,7 @@ export default function BuzzerPage() {
   const [isApproved, setIsApproved] = useState(false);
   const [countdownValue, setCountdownValue] = useState<number | null>(null);
   const [showTimeUpModal, setShowTimeUpModal] = useState(false);
+  const [gameMode, setGameMode] = useState<'buzzer' | 'turn'>('buzzer');
 
   // authoritative fields
   const [rawMode, setRawMode] = useState<string | null>(null);
@@ -26,6 +27,7 @@ export default function BuzzerPage() {
   const [wager, setWager] = useState('');
   const [wagerSubmitted, setWagerSubmitted] = useState(false);
   const [answer, setAnswer] = useState('');
+  const [buzzerWinnerName, setBuzzerWinnerName] = useState<string | null>(null);
 
   const [currentTurnName, setCurrentTurnName] = useState<string | null>(null);
   const countdownRef = useRef<number | null>(null);
@@ -219,10 +221,13 @@ export default function BuzzerPage() {
       if (gs.active_question_id && (gs.question_revealed === true || gs.is_question_visible === true)) { await loadQuestionById(gs.active_question_id); } else { setActiveQuestion(null); setFinalQ(null); }
       setShowAnswer(!!gs.answer_revealed);
       if (gs.final_countdown_expires_at) startLocalCountdown(gs.final_countdown_expires_at); else { if (countdownRef.current) { window.clearInterval(countdownRef.current); countdownRef.current = null; } }
-      if (gs.current_turn_team_id) {
-        const { data: t } = await supabase.from('teams').select('name').eq('id', gs.current_turn_team_id).maybeSingle();
-        setCurrentTurnName(t?.name ?? null);
-      } else setCurrentTurnName(null);
+      // Inside your buzzer client (buzzer/page) real-time listener for game_state
+if (gs.current_turn_team_id) {
+  const { data: t } = await supabase.from('teams').select('name').eq('id', gs.current_turn_team_id).maybeSingle();
+  setCurrentTurnName(t?.name ?? null);
+} else {
+  setCurrentTurnName(null);
+}
       
       // 👉 TRIGGER WINNER MODAL ON DATABASE CHANGE
       if (gs.game_over || gs.winner_screen || gs.show_winner || gs.scores_calculated || gs.round === 'final') {
@@ -617,16 +622,20 @@ async function submitWager(value: string | number | null) {
                   </button>
                 </div>
                 
-                {/* First buzzed team info shown dynamically in the status tile */}
-                <div className="font-bold text-center mt-4">
-                  {buzzerWinner ? (
-                    <span className="text-amber-400 text-lg animate-pulse">
-                      🚨 {buzzerWinner} BUZZED FIRST!
-                    </span>
-                  ) : (
-                    <span className="text-slate-400 text-xs">Waiting for host to open the buzzer...</span>
-                  )}
-                </div>
+                {/* Dynamic turn or buzzer info shown in the status tile */}
+<div className="font-bold text-center mt-4">
+  {gameMode === 'turn' ? (
+    <span className="text-sky-400 text-lg">
+      👉 CURRENT TURN: {currentTurnName ? currentTurnName.toUpperCase() : 'WAITING...'}
+    </span>
+  ) : buzzerWinnerName ? ( // Make sure this matches your state variable name!
+    <span className="text-amber-400 text-lg animate-pulse">
+      🚨 {buzzerWinnerName} BUZZED FIRST!
+    </span>
+  ) : (
+    <span className="text-slate-400 text-xs">Waiting for host to open the buzzer...</span>
+  )}
+</div>
               </div>
             )}
           </>
