@@ -42,6 +42,7 @@ export default function AdminPage() {
   const [buzzerOpen, setBuzzerOpen] = useState(false);
   const [buzzerWinnerName, setBuzzerWinnerName] = useState<string | null>(null);
   const [activeRound, setActiveRound] = useState<number | string>(1);
+  const [currentTurnTeamId, setCurrentTurnTeamId] = useState<number | null>(null);
 
   // Questions (manual / bulk)
   const [categories, setCategories] = useState<any[]>([]);
@@ -128,6 +129,7 @@ export default function AdminPage() {
         setGameMode(payload.new.mode ?? 'unknown');
         setActiveRound(payload.new.active_round ?? 1);
         setBuzzerOpen(payload.new.buzzer_open ?? false);
+        setCurrentTurnTeamId(payload.new.current_turn_team_id ?? null);
       }
     });
     safeSubscribe(gsChannel);
@@ -227,7 +229,24 @@ export default function AdminPage() {
   async function setMode(mode: 'buzzer' | 'turn') {
     const { error } = await supabase.from('game_state').update({ mode }).eq('id', 1);
     if (error) showNotification(`Failed to set mode: ${error.message}`, 'error');
-    else { setGameMode(mode); showNotification(`Mode set to ${mode}`, 'success'); }
+    else { 
+      setGameMode(mode); 
+      showNotification(`Mode set to ${mode}`, 'success');
+      
+      // Broadcast mode update to cast and buzzer clients
+      try {
+        await supabase.channel('cast_categories_sync').send({
+          type: 'broadcast',
+          event: 'game_mode_turn_update',
+          payload: { 
+            gameMode: mode,
+            currentTurnTeamId: null // Clear turn when switching modes
+          }
+        });
+      } catch (e) {
+        console.log('Mode broadcast failed:', e);
+      }
+    }
   }
 
   async function setCurrentTurn(teamId: number | null) {
@@ -260,11 +279,11 @@ export default function AdminPage() {
     const chosen = candidates[Math.floor(Math.random() * candidates.length)];
     const newHistory = [...history.filter(Boolean), chosen];
 
-    // 👉 1. Include game_mode: 'turn' in the admin panel's database update
+    // 👉 1. Include mode: 'turn' in the admin panel's database update
     const { error } = await supabase.from('game_state').update({ 
       current_turn_team_id: chosen, 
       turn_history: newHistory,
-      game_mode: 'turn' 
+      mode: 'turn' 
     }).eq('id', 1);
     
     if (error) {
@@ -670,16 +689,17 @@ export default function AdminPage() {
 </div>
   </div>
 
-                <div className="p-4 bg-[#0d1117] rounded-md border border-[#21262d]">
-                  <div className="text-xs text-slate-400">Current round</div>
-                  <div className="mt-2">
-                    <select value={String(activeRound)} onChange={(e) => setActiveRound(e.target.value)} className="bg-[#0d1117] border rounded-md px-3 py-2 text-sm">
-                      <option value="1">Round 1</option>
-                      <option value="2">Round 2</option>
-                      <option value="final">Final</option>
-                    </select>
-                  </div>
-                </div>
+                <div className="p-4 bg-[#0d1117] rounded-md border border-[#21262d] flex flex-col justify-between">
+  <div>
+    <div className="text-xs text-slate-400 uppercase tracking-wider">Current Turn Team</div>
+    <div className="mt-2 text-base font-bold text-emerald-400">
+      {currentTurnTeamId 
+        ? teams.find((t: any) => String(t.id) === String(currentTurnTeamId))?.name || `Team ID: ${currentTurnTeamId}`
+        : 'No team selected'}
+        <div className="text-xs text-zinc-500 mt-1">Debug ID: {String(currentTurnTeamId)} | Teams Loaded: {teams.length}</div>
+    </div>
+  </div>
+</div>
 
                 <div className="p-4 bg-[#0d1117] rounded-md border border-[#21262d]">
                   <div className="text-xs text-slate-400">Game actions</div>

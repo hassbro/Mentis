@@ -119,12 +119,15 @@ export default function BuzzerPage() {
       try {
         const { data } = await supabase.from('teams').select('approved,score').eq('id', tid).maybeSingle();
         if (data) {
+          console.log('BUZZER: Approval poll - team data:', data);
           setWaitingApproval(!data.approved);
           setIsApproved(!!data.approved);
           setTeamScore(data.score ?? 0);
           if (data.approved) {
             clearInterval(approvalPollRef.current); approvalPollRef.current = null;
           }
+        } else {
+          console.log('BUZZER: Approval poll - no team data found, team may have been deleted');
         }
       } catch (err) {
         console.error('approvalPoll error', err);
@@ -196,8 +199,13 @@ export default function BuzzerPage() {
         setBuzzerActive(!!b.active);
         if (b.active && b.winner_team_id) {
           const { data: t } = await supabase.from('teams').select('name').eq('id', b.winner_team_id).maybeSingle();
-          setBuzzerWinner(t?.name ?? null);
-        } else setBuzzerWinner(null);
+          const winnerName = t?.name ?? null;
+          setBuzzerWinner(winnerName);
+          setBuzzerWinnerName(winnerName); // Also set buzzerWinnerName for display
+        } else {
+          setBuzzerWinner(null);
+          setBuzzerWinnerName(null); // Also clear buzzerWinnerName
+        }
       }
     })();
 
@@ -270,6 +278,20 @@ if (gs.current_turn_team_id) {
       setGameWinner(null);
       setGameEnded(false);
       setWinnerTeams([]);
+      setBuzzerWinner(null);
+      setBuzzerWinnerName(null);
+    });
+    
+    // Listen for buzzer winner broadcast from host
+    winnerCh.on('broadcast', { event: 'buzzer_winner_update' }, (payload: any) => {
+      console.log('BUZZER: Received buzzer winner broadcast:', payload);
+      if (payload.payload && payload.payload.winnerName) {
+        setBuzzerWinnerName(payload.payload.winnerName);
+        setBuzzerWinner(payload.payload.winnerName);
+      } else {
+        setBuzzerWinnerName(null);
+        setBuzzerWinner(null);
+      }
     });
     console.log('BUZZER: Setting up winner broadcast listener on channel: cast_categories_sync');
     // subscribe and store channel object (not subscribe result)
@@ -291,14 +313,22 @@ if (gs.current_turn_team_id) {
       
       if (b.active) {
         setHasBuzzed(false);
+        setBuzzerWinner(null);
+        setBuzzerWinnerName(null);
       }
 
       // Show the winner whenever a winner_team_id is set in the database
       if (b.winner_team_id) {
+        console.log('BUZZER: Database has winner_team_id:', b.winner_team_id);
         const { data: t } = await supabase.from('teams').select('name').eq('id', b.winner_team_id).maybeSingle();
-        setBuzzerWinner(t?.name ?? null);
+        const winnerName = t?.name ?? null;
+        console.log('BUZZER: Fetched winner name:', winnerName);
+        setBuzzerWinner(winnerName);
+        setBuzzerWinnerName(winnerName); // Also set buzzerWinnerName for display
       } else {
+        console.log('BUZZER: No winner_team_id in database');
         setBuzzerWinner(null); // Clears automatically when the host resets/clears the winner!
+        setBuzzerWinnerName(null); // Also clear buzzerWinnerName
       }
     });
     safeSubscribe(bzCh);
@@ -439,6 +469,10 @@ async function submitWager(value: string | number | null) {
     if (!teamId || !buzzerActive || hasBuzzed) return;
     
     setHasBuzzed(true);
+    const currentTeamName = teamName; // Capture current team name
+    console.log('BUZZER: User buzzed! Team:', currentTeamName);
+    setBuzzerWinner(currentTeamName); // Set local state immediately for instant feedback
+    setBuzzerWinnerName(currentTeamName); // Also set buzzerWinnerName
     const res = await supabase.from('buzzers').update({ active: false, winner_team_id: teamId }).eq('id', 1);
     console.debug('buzz write ->', res);
   }
@@ -628,9 +662,9 @@ async function submitWager(value: string | number | null) {
     <span className="text-sky-400 text-lg">
       👉 CURRENT TURN: {currentTurnName ? currentTurnName.toUpperCase() : 'WAITING...'}
     </span>
-  ) : buzzerWinnerName ? ( // Make sure this matches your state variable name!
+  ) : buzzerWinnerName ? (
     <span className="text-amber-400 text-lg animate-pulse">
-      🚨 {buzzerWinnerName} BUZZED FIRST!
+      🚨 {buzzerWinnerName.toUpperCase()} BUZZED FIRST!
     </span>
   ) : (
     <span className="text-slate-400 text-xs">Waiting for host to open the buzzer...</span>

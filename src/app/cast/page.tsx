@@ -39,6 +39,12 @@ export default function CastPage() {
     isMountedRef.current = true;
     if (typeof window !== 'undefined') {
       setOriginUrl(window.location.origin);
+      
+      // Auto-move window to external display if available (Electron environment)
+      if (window.electronAPI && window.electronAPI.moveToExternalDisplay) {
+        console.log('CAST: Attempting to move to external display');
+        window.electronAPI.moveToExternalDisplay();
+      }
     }
 
     
@@ -75,6 +81,7 @@ export default function CastPage() {
     
     channel.on('broadcast', { event: 'categories_update' }, (payload: any) => {
       if (payload.payload && isMountedRef.current) {
+        console.log('CAST: Received categories update:', payload.payload);
         setCategories(payload.payload.categories || []);
         setQuestionsMap(payload.payload.questionsMap || {});
         setShowQR(false); 
@@ -396,7 +403,13 @@ console.log('currentTurnName:', currentTurnName);
           ) : isQuestionVisible && activeQuestion ? (
             <div className="w-full bg-slate-900/90 border border-slate-700 rounded-3xl p-12 shadow-2xl text-center space-y-6">
               <div className="text-amber-400 font-bold text-sm uppercase tracking-widest">
-                Active Clue ({activeQuestion.points} Points)
+                Active Clue ({(() => {
+                  // Calculate display points based on board type
+                  const points = activeQuestion.points || 0;
+                  const boardPoints = Array.from(new Set(Object.values(questionsMap).flatMap(Object.keys).map(Number)));
+                  const isDouble = boardPoints.includes(2000);
+                  return isDouble ? points * 2 : points;
+                })()} Points)
               </div>
 
               {/* Daily Double Indicator Badge */}
@@ -454,7 +467,7 @@ console.log('currentTurnName:', currentTurnName);
           : 'bg-slate-900/60 border-slate-700/80 text-amber-400 shadow-md'
       }`}
     >
-      {isAnswered ? '—' : `$${pt}`}
+      {isAnswered ? '—' : `${pt}`}
     </div>
   );
 })}
@@ -473,12 +486,15 @@ console.log('currentTurnName:', currentTurnName);
               </span>
             </div>
             <div className="flex-1 overflow-y-auto space-y-2 pr-1">
-              {teams.map((t) => (
-                <div key={t.id} className="bg-black/30 border border-slate-800 px-3 py-2.5 rounded-lg flex justify-between items-center">
-                  <span className="font-semibold text-sm truncate mr-2">{t.name}</span>
-                  <span className="text-amber-400 font-mono font-bold text-sm">{t.score}</span>
-                </div>
-              ))}
+              {teams.map((t) => {
+                const isCurrentTurn = gameMode === 'turn' && t.id === currentTurnTeamId;
+                return (
+                  <div key={t.id} className={`bg-black/30 border px-3 py-2.5 rounded-lg flex justify-between items-center ${isCurrentTurn ? 'border-amber-400 bg-amber-400/10' : 'border-slate-800'}`}>
+                    <span className="font-semibold text-sm truncate mr-2">{t.name} {isCurrentTurn && '(Turn)'}</span>
+                    <span className="text-amber-400 font-mono font-bold text-sm">{t.score}</span>
+                  </div>
+                );
+              })}
               {teams.length === 0 && (
                 <div className="text-xs text-slate-500 text-center py-6">No teams registered</div>
               )}

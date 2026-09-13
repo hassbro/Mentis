@@ -732,12 +732,35 @@ if (!finalQ) {
     setShowAnswer(false);
 
     try {
+      // Clear buzzer winner and reset buzzer state
+      await supabase.from('buzzers').update({ active: false, winner_team_id: null }).eq('id', 1);
+      
+      // Update game state with active question, respecting current mode
       await supabase.from('game_state').update({
         active_question_id: question.id,
         question_revealed: true,
         answer_revealed: false,
-        mode: gameMode // Keeps whatever mode is active ('turn' or 'buzzer')
+        mode: gameMode // Keep current mode (turn or buzzer)
       }).eq('id', 1);
+      
+      // Broadcast game mode update to cast and buzzer clients
+      await supabase.channel('cast_categories_sync').send({
+        type: 'broadcast',
+        event: 'game_mode_turn_update',
+        payload: { gameMode, currentTurnTeamId: gameMode === 'turn' ? currentTurnTeamId : null }
+      });
+      
+      // Open buzzer ONLY if in buzzer mode (after a brief delay to ensure state sync)
+      if (gameMode === 'buzzer') {
+        setTimeout(async () => {
+          await supabase.from('buzzers').update({ active: true }).eq('id', 1);
+          console.log('Buzzer opened for question:', question.id);
+        }, 100);
+      } else {
+        console.log('Turn mode: Buzzer not opened');
+      }
+      
+      console.log('Question clicked: Cleared buzzer winner, mode:', gameMode);
     } catch (e) {
       console.error('Failed to publish active question to game_state', e);
     }
@@ -832,6 +855,9 @@ if (!finalQ) {
         answer_revealed: false,
         mode: gameMode
       }).eq('id', 1);
+      
+      // Close buzzer after scoring
+      await supabase.from('buzzers').update({ active: false, winner_team_id: null }).eq('id', 1);
     } catch (e) {
       console.error('Failed to clear active question', e);
     }
@@ -1268,7 +1294,7 @@ const currentTurnName = currentTeam ? currentTeam.name : null;
         is_answered: true
       }).eq('id', activeQuestion.id);
 
-      // 2. Clear active question in game_state
+      // 2. Clear active question in game_state and close buzzer
       await supabase.from('game_state').update({
         active_question_id: null,
         question_revealed: false,
@@ -1277,8 +1303,11 @@ const currentTurnName = currentTeam ? currentTeam.name : null;
         mode: 'buzzer',
         answered_questions: updatedAnswered
       }).eq('id', 1);
+      
+      // 3. Close buzzer
+      await supabase.from('buzzers').update({ active: false, winner_team_id: null }).eq('id', 1);
 
-      // 3. Broadcast clear event and updated answered state to the cast screen
+      // 4. Broadcast clear event and updated answered state to the cast screen
       try {
         await supabase.channel('cast_categories_sync').send({
           type: 'broadcast',
