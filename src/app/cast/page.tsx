@@ -5,12 +5,16 @@ import { supabase } from '@/lib/supabase';
 export default function CastPage() {
   const [gameState, setGameState] = useState<any | null>(null);
   const [teams, setTeams] = useState<any[]>([]);
+  const [gameMode, setGameMode] = useState<'buzzer' | 'turn'>('buzzer');
   const [categories, setCategories] = useState<any[]>([]);
   const [questionsMap, setQuestionsMap] = useState<{ [catId: number]: { [points: number]: any } }>({});
   const [activeQuestion, setActiveQuestion] = useState<any | null>(null);
   const [buzzerWinnerName, setBuzzerWinnerName] = useState<string | null>(null);
   const [originUrl, setOriginUrl] = useState('');
   const [showQR, setShowQR] = useState(true);
+  const [currentTurnTeamId, setCurrentTurnTeamId] = useState<number | null>(null);
+  const currentTeam = teams.find((t: any) => t.id === currentTurnTeamId);
+  const currentTurnName = currentTeam ? currentTeam.name : null;
   
   const [showWinnerModal, setShowWinnerModal] = useState(false);
   const [isFinalActive, setIsFinalActive] = useState(false);
@@ -44,11 +48,16 @@ export default function CastPage() {
       if (!isMountedRef.current) return;
       if (gs) {
         setGameState(gs);
+        
+        // 👉 ADD THESE TWO LINES TO SYNC INITIAL LOAD STATE:
+        if (gs.game_mode) setGameMode(gs.game_mode);
+        if (gs.current_turn_team_id !== undefined) setCurrentTurnTeamId(gs.current_turn_team_id);
+
         if (gs.active_question_id) {
-        loadActiveQuestion(gs.active_question_id);
-      } else {
-        setActiveQuestion(null); // 👉 This forces the placard to drop instantly when canceled
-      }
+          loadActiveQuestion(gs.active_question_id);
+        } else {
+          setActiveQuestion(null); 
+        }
         if (gs.show_winner || gs.winner_revealed || gs.game_over || gs.scores_calculated || gs.winner_screen) {
           setShowWinnerModal(true);
         }
@@ -70,6 +79,43 @@ export default function CastPage() {
         setQuestionsMap(payload.payload.questionsMap || {});
         setShowQR(false); 
         setGameEnded(false); // Reset game ended when new board loads
+      }
+    });
+
+    channel.on('broadcast', { event: 'clear_active_question' }, () => {
+      if (isMountedRef.current) {
+        setActiveQuestion(null);
+      }
+    });
+
+    // Listen for game mode and turn updates via broadcast
+    channel.on('broadcast', { event: 'game_state_update' }, (payload: any) => {
+      if (payload.payload && isMountedRef.current) {
+        if (payload.payload.gameMode) {
+          setGameMode(payload.payload.gameMode);
+        }
+        if (payload.payload.currentTurnTeamId !== undefined) {
+          setCurrentTurnTeamId(payload.payload.currentTurnTeamId);
+        }
+      }
+    });
+
+    // Your existing buzzer winner broadcast listener
+    channel.on('broadcast', { event: 'buzzer_winner_update' }, (payload: any) => {
+      if (payload.payload && isMountedRef.current) {
+        setBuzzerWinnerName(payload.payload.winnerName);
+      }
+    });
+
+    // Listen for game mode and turn updates from the host
+    channel.on('broadcast', { event: 'game_mode_turn_update' }, (payload: any) => {
+      if (payload.payload && isMountedRef.current) {
+        if (payload.payload.gameMode !== undefined) {
+          setGameMode(payload.payload.gameMode);
+        }
+        if (payload.payload.currentTurnTeamId !== undefined) {
+          setCurrentTurnTeamId(payload.payload.currentTurnTeamId);
+        }
       }
     });
 
@@ -169,11 +215,17 @@ setGameWinner(null);
       }
     }).subscribe();
 
-    // Real-time listener for buzzers
+    // Real-time listener for buzzers & game state
     const bzCh = supabase.channel(`cast_buzzers_${Date.now()}`);
     bzCh.on('postgres_changes', { event: '*', schema: 'public', table: 'buzzers' }, async (payload: any) => {
       const b = payload.new;
       if (!b || !isMountedRef.current) return;
+
+      // Update game mode and turn team ID if present in the payload
+      if (b.game_mode) setGameMode(b.game_mode);
+      if (b.current_turn_team_id !== undefined) setCurrentTurnTeamId(b.current_turn_team_id);
+
+      // Handle buzzer winner
       if (b.winner_team_id) {
         const { data: t } = await supabase.from('teams').select('name').eq('id', b.winner_team_id).maybeSingle();
         setBuzzerWinnerName(t?.name ?? null);
@@ -262,6 +314,11 @@ setGameWinner(null);
   const finalCountdown = gameState?.final_countdown_expires_at 
     ? Math.max(0, Math.ceil((new Date(gameState.final_countdown_expires_at).getTime() - Date.now()) / 1000))
     : null;
+
+    console.log('--- CAST RENDER DEBUG ---');
+console.log('gameMode:', gameMode);
+console.log('currentTurnTeamId:', currentTurnTeamId);
+console.log('currentTurnName:', currentTurnName);
 
   return (
     <main className="min-h-screen bg-[#0b0f19] text-white p-6 flex flex-col justify-between select-none relative">
@@ -429,11 +486,22 @@ setGameWinner(null);
           </div>
 
           <div className="bg-[#0d1117] border border-[#21262d] rounded-xl p-4 text-center shadow-lg">
-            <div className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">First Buzzed Team</div>
-            <div className="font-black text-amber-400 mt-1.5 text-sm tracking-wide">
-              {buzzerWinnerName ? `🚨 ${buzzerWinnerName.toUpperCase()} BUZZED FIRST!` : 'NO BUZZES YET'}
-            </div>
-          </div>
+  {gameMode === 'turn' ? (
+    <>
+      <div className="text-[10px] uppercase tracking-wider text-sky-400 font-bold">Current Turn</div>
+      <div className="font-black text-white mt-1.5 text-sm tracking-wide">
+        {currentTurnName ? currentTurnName.toUpperCase() : 'WAITING FOR TURN'}
+      </div>
+    </>
+  ) : (
+    <>
+      <div className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">First Buzzed Team</div>
+      <div className="font-black text-amber-400 mt-1.5 text-sm tracking-wide">
+        {buzzerWinnerName ? `${buzzerWinnerName.toUpperCase()} BUZZED FIRST!` : 'NO BUZZES YET'}
+      </div>
+    </>
+  )}
+</div>
         </aside>
       </div>
 
