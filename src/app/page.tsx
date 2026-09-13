@@ -85,7 +85,6 @@ function GameContent() {
 
   const [round, setRound] = useState<'jeopardy' | 'double_jeopardy' | 'final'>('jeopardy');
   const [answeredQuestions, setAnsweredQuestions] = useState<{ [qId: number]: boolean }>({});
-  const [dailyDoubles, setDailyDoubles] = useState<Set<number>>(new Set());
   
   // Simple ID-based tracking for used categories
   const [jeopardyCategoryIds, setJeopardyCategoryIds] = useState<number[]>([]);
@@ -94,9 +93,6 @@ function GameContent() {
   const [activeQuestion, setActiveQuestion] = useState<any | null>(null);
   const [showAnswer, setShowAnswer] = useState(false);
   // daily double
-  const [isDailyDoubleScreen, setIsDailyDoubleScreen] = useState(false);
-  const [wagerAmount, setWagerAmount] = useState<string>('');
-  const [wagerError, setWagerError] = useState<string>('');
 
   // final
   const [finalQuestion, setFinalQuestion] = useState<any | null>(null);
@@ -118,8 +114,9 @@ function GameContent() {
   // buzzer & game_state
   const [buzzerActive, setBuzzerActive] = useState(false);
   const [buzzerWinnerName, setBuzzerWinnerName] = useState<string | null>(null);
-  const [gameMode, setGameMode] = useState<'buzzer' | 'turn' | 'unknown'>('unknown');
+  const [gameMode, setGameMode] = useState<'buzzer' | 'turn'>('buzzer');
   const [currentTurnTeamId, setCurrentTurnTeamId] = useState<number | null>(null);
+  
 
   // channel refs (for safe cleanup / reuse)
   const finalSubsChannelRef = useRef<any | null>(null);
@@ -173,7 +170,19 @@ function GameContent() {
     else { setRound(targetRound as any); fetchGameData(targetRound as any); }
   }, [roundParam]);
 
-  // Real-time listener for who buzzed first
+  useEffect(() => {
+    async function initFirstTurn() {
+      const { data: gs } = await supabase.from('game_state').select('current_turn_team_id').eq('id', 1).maybeSingle();
+      
+      // If the game just loaded and no turn is set yet, call setNextTurnInDB to assign team #1
+      if (!gs || !gs.current_turn_team_id) {
+        await setNextTurnInDB();
+      }
+    }
+    initFirstTurn();
+  }, []);
+
+  // Real-time listener for who buzzed first & state changes
   useEffect(() => {
     const channel = supabase
       .channel('main_board_buzzers_realtime')
@@ -184,12 +193,46 @@ function GameContent() {
           const b = payload.new;
           if (!b) return;
           
+          // 👉 1. Always broadcast game mode and turn updates whenever the row changes
+          try {
+            await supabase.channel('cast_categories_sync').send({
+              type: 'broadcast',
+              event: 'game_mode_turn_update',
+              payload: { 
+                gameMode: b.game_mode, 
+                currentTurnTeamId: b.current_turn_team_id 
+              }
+            });
+          } catch (e) {
+            console.log('Game mode/turn broadcast failed:', e);
+          }
+
+          // 👉 2. Existing buzzer winner logic
           if (b.winner_team_id) {
             const { data: t } = await supabase.from('teams').select('name').eq('id', b.winner_team_id).maybeSingle();
             setIsQuestionVisible(payload.new.is_question_visible ?? false);
-            setBuzzerWinnerName(t?.name ?? null);
+            const winnerName = t?.name ?? null;
+            setBuzzerWinnerName(winnerName);
+
+            try {
+              await supabase.channel('cast_categories_sync').send({
+                type: 'broadcast',
+                event: 'buzzer_winner_update',
+                payload: { winnerName }
+              });
+            } catch (e) {
+              console.log('Buzzer broadcast failed:', e);
+            }
           } else {
             setBuzzerWinnerName(null);
+
+            try {
+              await supabase.channel('cast_categories_sync').send({
+                type: 'broadcast',
+                event: 'buzzer_winner_update',
+                payload: { winnerName: null }
+              });
+            } catch (e) {}
           }
         }
       )
@@ -416,7 +459,7 @@ function GameContent() {
     const assignedQuestions = Object.values(map).flatMap(pm => Object.values(pm).filter(Boolean));
     const shuffled = [...assignedQuestions].sort(() => Math.random() - 0.5);
     const ddSet = new Set<number>(shuffled.slice(0, Math.min(2, shuffled.length)).map((q: any) => q.id));
-    setDailyDoubles(ddSet);
+    
 
     setQuestionsMap(map);
 
@@ -687,31 +730,16 @@ if (!finalQ) {
 
     setActiveQuestion(question);
     setShowAnswer(false);
-    setWagerError('');
-
-    const isDD = dailyDoubles.has(question.id);
-
-    // If it's a Daily Double, keep 'daily_double'. 
-    // Otherwise, respect your current mode (e.g. keep 'turn' or 'turn_mode' if active, else default to 'buzzer')
-    const targetMode = isDD ? 'daily_double' : (gameMode === 'turn' ? 'turn' : 'buzzer');
 
     try {
       await supabase.from('game_state').update({
         active_question_id: question.id,
         question_revealed: true,
         answer_revealed: false,
-        mode: targetMode 
+        mode: gameMode // Keeps whatever mode is active ('turn' or 'buzzer')
       }).eq('id', 1);
     } catch (e) {
       console.error('Failed to publish active question to game_state', e);
-    }
-
-    if (isDD) {
-      setIsDailyDoubleScreen(true);
-      const score = teams[activeTeamIndex]?.score || 0;
-      setWagerAmount(String(Math.max(question.points, score)));
-    } else {
-      setIsDailyDoubleScreen(false);
     }
   }
 
@@ -732,7 +760,13 @@ if (!finalQ) {
       return;
     }
 
-    const { data: teamsData } = await supabase.from('teams').select('id').eq('approved', true).order('id', { ascending: true });
+    // 👉 Stable sort by ID ensures team order never shifts when scores change
+    const { data: teamsData } = await supabase
+      .from('teams')
+      .select('id')
+      .eq('approved', true)
+      .order('id', { ascending: true }); 
+
     if (!teamsData || teamsData.length === 0) {
       await supabase.from('game_state').update({ current_turn_team_id: null }).eq('id', 1);
       return;
@@ -756,6 +790,7 @@ if (!finalQ) {
     }
 
     await supabase.from('game_state').update({ current_turn_team_id: nextId }).eq('id', 1);
+    setCurrentTurnTeamId(nextId);
   } catch (err) {
     console.error('setNextTurnInDB error', err);
   }
@@ -764,64 +799,44 @@ if (!finalQ) {
   async function handleScoreAdjustment(correct: boolean) {
     if (!activeQuestion) return;
 
-    const isDD = dailyDoubles.has(activeQuestion.id);
-    const pointsToUse = isDD ? (parseInt(wagerAmount) || 0) : activeQuestion.points;
+    const pointsToUse = activeQuestion.points;
 
-    console.log('=== SCORE ADJUSTMENT DEBUG ===');
-    console.log('Game mode:', gameMode);
-    console.log('Active question:', activeQuestion);
-    console.log('Points to use:', pointsToUse);
-    console.log('Correct:', correct);
-    console.log('Buzzer winner name:', buzzerWinnerName);
-
-    // In buzzer mode, use the buzzer winner from local state
     let scoringTeamId;
     if (gameMode === 'buzzer' && buzzerWinnerName) {
-      // Find team by name
       const scoringTeam = teams.find(t => t.name === buzzerWinnerName);
       scoringTeamId = scoringTeam?.id;
-      console.log('Buzzer mode: Using buzzer winner name:', buzzerWinnerName);
-      console.log('Buzzer mode: Found team by name:', scoringTeam);
     } else if (gameMode === 'buzzer') {
-      // Fallback to database if name not available
       const { data: buzzerData } = await supabase.from('buzzers').select('winner_team_id').eq('id', 1).maybeSingle();
       scoringTeamId = buzzerData?.winner_team_id;
-      console.log('Buzzer mode: Buzzer data:', buzzerData);
-      console.log('Buzzer mode: Using buzzer winner team ID:', scoringTeamId);
     } else {
+      // Turn mode: explicitly use current_turn_team_id from DB or fallback
       const { data: gs } = await supabase.from('game_state').select('current_turn_team_id').maybeSingle();
-      scoringTeamId = gs?.current_turn_team_id ?? (teams[activeTeamIndex] && teams[activeTeamIndex].id);
-      console.log('Turn mode: Game state:', gs);
-      console.log('Turn mode: Using current turn team ID:', scoringTeamId);
+      scoringTeamId = gs?.current_turn_team_id;
     }
     
-    const scoringTeam = teams.find(t => t.id === scoringTeamId) ?? teams[activeTeamIndex];
-    console.log('Scoring team:', scoringTeam, 'Team ID:', scoringTeamId);
-    console.log('All teams:', teams);
+    const scoringTeam = teams.find(t => t.id === scoringTeamId);
 
     if (scoringTeam) {
       const updatedScore = correct ? scoringTeam.score + pointsToUse : scoringTeam.score - pointsToUse;
-      console.log('Current score:', scoringTeam.score, 'Updated score:', updatedScore);
       await supabase.from('teams').update({ score: updatedScore }).eq('id', scoringTeam.id);
       await fetchTeams();
-    } else {
-      console.warn('No scoring team found!');
     }
 
-    // Mark question as answered globally to prevent repetition
-    console.log('Marking question as answered:', activeQuestion.id);
+    // Mark question as answered globally
     await supabase.from('questions').update({ is_answered: true }).eq('id', activeQuestion.id);
 
     try {
       await supabase.from('game_state').update({
         active_question_id: null,
         question_revealed: false,
-        answer_revealed: false
+        answer_revealed: false,
+        mode: gameMode
       }).eq('id', 1);
     } catch (e) {
-      console.error('Failed to clear active question in game_state', e);
+      console.error('Failed to clear active question', e);
     }
 
+    // Advance turn if in turn mode
     if (gameMode === 'turn') {
       await setNextTurnInDB();
     }
@@ -829,9 +844,6 @@ if (!finalQ) {
     setAnsweredQuestions(prev => ({ ...prev, [activeQuestion.id]: true }));
     setActiveQuestion(null);
     setShowAnswer(false);
-    setIsDailyDoubleScreen(false);
-    setWagerAmount('');
-    setWagerError('');
   }
 
   if (loading) {
@@ -899,9 +911,7 @@ if (!finalQ) {
               setGameEnded(false);
               setWinnerDetails(null);
               setShowAnswer(false);
-              setIsDailyDoubleScreen(false);
-              setWagerAmount('');
-              setWagerError('');
+              
               // 5. Reset game state
               await supabase.from('game_state').update({
                 game_over: false,
@@ -1075,9 +1085,11 @@ if (!finalQ) {
   }
 
   // NON-FINAL rendering (grid etc)
-  const cols = Math.max(1, categories.length);
-  const tileHeight = 80;
-  const headerHeight = 56;
+const cols = Math.max(1, categories.length);
+const tileHeight = 80;
+const headerHeight = 56;
+const currentTeam = teams.find(t => t.id === currentTurnTeamId);
+const currentTurnName = currentTeam ? currentTeam.name : null;
 
   return (
     <main className="min-h-screen bg-[#181c25] text-slate-100 p-6">
@@ -1137,22 +1149,37 @@ if (!finalQ) {
           </div>
         </div>
 
-        <aside className="w-80 bg-[#222733] border border-[#2f3748] p-5 rounded-2xl">
-          <div className="flex justify-between items-center border-b pb-3">
+<aside className="w-80 bg-[#222733] border border-[#2f3748] p-5 rounded-2xl">          <div className="flex justify-between items-center border-b pb-3">
             <div className="text-sm font-bold"><Trophy className="inline-block w-4 h-4 mr-2 text-amber-400" /> Team Scores</div>
             <button onClick={() => fetchTeams()} className="text-xs">Refresh</button>
           </div>
 
           <div className="space-y-3 max-h-[400px] overflow-y-auto pr-1 mt-3">
-            {teams.map((team, index) => (
-              <div key={team.id} onClick={() => setActiveTeamIndex(index)} className={`p-3 rounded-xl border flex justify-between items-center ${activeTeamIndex === index ? 'ring-1 ring-amber-400/30' : 'bg-[#1b202a]'}`}>
-                <span className="font-bold text-xs">{team.name}</span>
-                <div className="flex items-center gap-2">
-                  <span className="font-black text-base text-amber-300">{team.score}</span>
-                  <button onClick={(e) => { e.stopPropagation(); supabase.from('teams').delete().eq('id', team.id).then(() => fetchTeams()); }} className="text-slate-500 hover:text-red-400 p-1"><Trash2 className="w-3 h-3" /></button>
+            {teams.map((team, index) => {
+              const isCurrentTurn = gameMode === 'turn' && team.id === currentTurnTeamId;
+              return (
+                <div 
+                  key={team.id} 
+                  onClick={() => setActiveTeamIndex(index)} 
+                  className={`p-3 rounded-xl border flex justify-between items-center transition-all ${
+                    isCurrentTurn 
+                      ? 'border-amber-400 bg-amber-400/10 ring-2 ring-amber-400/40' 
+                      : activeTeamIndex === index 
+                        ? 'border-slate-500 bg-[#1b202a]' 
+                        : 'border-[#2f3748] bg-[#1b202a]'
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    {isCurrentTurn && <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />}
+                    <span className="font-bold text-xs text-slate-200">{team.name} {isCurrentTurn && '(Turn)'}</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="font-black text-base text-amber-300">{team.score}</span>
+                    <button onClick={(e) => { e.stopPropagation(); supabase.from('teams').delete().eq('id', team.id).then(() => fetchTeams()); }} className="text-slate-500 hover:text-red-400 p-1"><Trash2 className="w-3 h-3" /></button>
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           <form onSubmit={(e) => { e.preventDefault(); if (!newTeamName.trim()) return; supabase.from('teams').insert([{ name: newTeamName.trim(), score: 0, approved: true }]).then(() => { setNewTeamName(''); fetchTeams(); }); }} className="flex gap-2 pt-2 border-t mt-4">
@@ -1162,13 +1189,36 @@ if (!finalQ) {
 
           <div className="mt-4 pt-4 border-t">
             <div className="bg-[#0d1117] border border-[#21262d] rounded-xl p-4 text-center">
-              <div className="text-[10px] uppercase text-slate-400">First Buzzed Team</div>
-              <div className="font-black text-amber-400 mt-1">{buzzerWinnerName ? buzzerWinnerName.toUpperCase() : 'NO BUZZES YET'}</div>
+              {gameMode === 'turn' ? (
+                <>
+                  <div className="text-[10px] uppercase text-sky-400 font-semibold">Current Turn</div>
+                  <div className="font-black text-white mt-1">
+                    {currentTurnName ? currentTurnName.toUpperCase() : 'WAITING FOR TURN'}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="text-[10px] uppercase text-slate-400">First Buzzed Team</div>
+                  <div className="font-black text-amber-400 mt-1">
+                    {buzzerWinnerName ? buzzerWinnerName.toUpperCase() : 'NO BUZZES YET'}
+                  </div>
+                </>
+              )}
             </div>
 
             <div className="flex gap-2 mt-3">
-              <button onClick={() => supabase.from('buzzers').upsert({ id:1, active: !buzzerActive, winner_team_id: null }).then(() => setBuzzerActive(!buzzerActive))} className={`flex-1 py-2 rounded-xl font-bold ${buzzerActive ? 'bg-rose-600 text-white' : 'bg-emerald-500 text-slate-900'}`}>{buzzerActive ? 'Lock' : 'Open'}</button>
-              <button onClick={() => supabase.from('buzzers').update({ active: false, winner_team_id: null }).eq('id',1)} className="flex-1 py-2 rounded-xl bg-[#0d1117] border border-[#21262d] text-slate-300">Reset</button>
+              <button 
+                onClick={() => supabase.from('buzzers').upsert({ id: 1, active: !buzzerActive, winner_team_id: null }).then(() => setBuzzerActive(!buzzerActive))} 
+                className={`flex-1 py-2 rounded-xl font-bold ${buzzerActive ? 'bg-rose-600 text-white' : 'bg-emerald-500 text-slate-900'}`}
+              >
+                {buzzerActive ? 'Lock' : 'Open'}
+              </button>
+              <button 
+                onClick={() => supabase.from('buzzers').update({ active: false, winner_team_id: null }).eq('id', 1)} 
+                className="flex-1 py-2 rounded-xl bg-[#0d1117] border border-[#21262d] text-slate-300"
+              >
+                Reset
+              </button>
             </div>
           </div>
         </aside>
@@ -1177,129 +1227,87 @@ if (!finalQ) {
       {/* active question modal (non-final) */}
       {activeQuestion && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4 z-50">
-          <div className="bg-[#222733] border-2 border-amber-400/20 max-w-2xl w-full p-8 rounded-3xl shadow-2xl text-center">
-            {isDailyDoubleScreen ? (
-              <div className="space-y-6">
-                <div className="inline-flex items-center gap-2 bg-amber-400/20 text-amber-300 px-5 py-2 rounded-full text-sm font-extrabold uppercase">Daily Double!</div>
-                
-                {(() => {
-                  // 👉 1. Check if the active team has already submitted a wager from their buzzer client
-                  const currentTeamWager = teams[activeTeamIndex]?.daily_double_wager;
-                  const hasClientWager = currentTeamWager !== null && currentTeamWager !== undefined && currentTeamWager > 0;
-                  
+          <div className="bg-[#222733] border-2 border-amber-400/20 max-w-2xl w-full p-8 rounded-3xl shadow-2xl text-center space-y-6">
+            <div className="text-xs text-slate-400 uppercase tracking-widest">
+              <span>{activeQuestion.points} Points</span>
+            </div>
+            <h2 className="text-2xl sm:text-3xl font-bold text-slate-100">{activeQuestion.clue}</h2>
 
-                  return (
-                    <>
-                      <div className="text-xs text-slate-400 uppercase tracking-widest">
-                        {hasClientWager 
-                          ? `Wager Submitted by Player: ${currentTeamWager}` 
-                          : 'Enter Wager (Player has not submitted)'}
-                      </div>
-
-                      <h3 className="text-xl font-bold">Place Your Wager</h3>
-                      
-                      <input 
-                        type="number" 
-                        min={5} 
-                        max={Math.max(activeQuestion.points, teams[activeTeamIndex]?.score || 0)} 
-                        value={hasClientWager ? currentTeamWager : wagerAmount} 
-                        disabled={hasClientWager} // 👉 2. Locks host input if client submitted
-                        onChange={(e) => setWagerAmount(e.target.value)} 
-                        className="w-full bg-[#1b202a] border rounded-xl px-4 py-3 text-center text-xl font-black text-amber-300 disabled:opacity-50" 
-                      />
-                      
-                      <div className="flex gap-2 justify-center">
-                        <button 
-                          onClick={() => { 
-                            // 👉 3. Use client wager if available, otherwise validate host input
-                            const finalWager = hasClientWager ? currentTeamWager : parseInt(wagerAmount);
-                            const maxAllowed = Math.max(activeQuestion.points, teams[activeTeamIndex]?.score || 0); 
-                            
-                            if (!hasClientWager && (isNaN(finalWager) || finalWager < 5 || finalWager > maxAllowed)) { 
-                              setWagerError(`Wager must be between 5 and ${maxAllowed}`); 
-                              return; 
-                            } 
-                            
-                            setWagerAmount(String(finalWager));
-                            setIsDailyDoubleScreen(false); 
-                          }} 
-                          className="bg-amber-400 text-slate-900 py-3 px-6 rounded-xl font-bold"
-                        >
-                          Confirm & Proceed
-                        </button>
-                      </div>
-                    </>
-                  );
-                })()}
-
-                {wagerError && <div className="text-xs text-rose-400">{wagerError}</div>}
+            {showAnswer ? (
+              <div className="bg-[#1b202a] border border-[#293244] p-4 rounded-2xl">
+                <div className="text-xs text-slate-400 uppercase">Correct Answer:</div>
+                <div className="text-2xl font-black text-amber-300">{activeQuestion.answer}</div>
               </div>
             ) : (
-              <div className="space-y-6">
-                <div className="text-xs text-slate-400 uppercase tracking-widest"><span>{activeQuestion.points} Points</span></div>
-                <h2 className="text-2xl sm:text-3xl font-bold text-slate-100">{activeQuestion.clue}</h2>
+              <button onClick={revealAnswerHandler} className="bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold py-3 px-6 rounded-xl">
+                Reveal Answer
+              </button>
+            )}
 
-                {showAnswer ? (
-                  <div className="bg-[#1b202a] border border-[#293244] p-4 rounded-2xl">
-                    <div className="text-xs text-slate-400 uppercase">Correct Answer:</div>
-                    <div className="text-2xl font-black text-amber-300">{activeQuestion.answer}</div>
-                  </div>
-                ) : (
-                  <button onClick={revealAnswerHandler} className="bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold py-3 px-6 rounded-xl">Reveal Answer</button>
-                )}
+            <div className="flex items-center justify-center gap-4 pt-4 border-t">
+              <button 
+                onClick={() => handleScoreAdjustment(false)} 
+                className="flex-1 bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 py-3.5 rounded-xl font-bold"
+              >
+                Incorrect
+              </button>
 
-                <div className="flex items-center justify-center gap-4 pt-4 border-t">
-  <button 
-    onClick={() => handleScoreAdjustment(false)} 
-    className="flex-1 bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 py-3.5 rounded-xl"
-  >
-    Incorrect
-  </button>
-
-  {/* 👉 Only show Cancel button if we are in buzzer mode */}
-  {gameMode === 'buzzer' && (
+              {/* Only show Cancel button if we are in buzzer mode */}
+              {gameMode === 'buzzer' && (
   <button 
     onClick={async () => {
-  if (!activeQuestion) return;
+      if (!activeQuestion) return;
 
-  const updatedAnswered = {
-    ...answeredQuestions,
-    [activeQuestion.id]: true
-  };
+      const updatedAnswered = {
+        ...answeredQuestions,
+        [activeQuestion.id]: true
+      };
 
-  // 1. Update Supabase to clear active question, reset mode, and push updated answered_questions
-  await supabase.from('game_state').update({
-    active_question_id: null,
-    question_revealed: false,
-    is_question_visible: false,
-    answer_revealed: false,
-    mode: 'buzzer',
-    answered_questions: updatedAnswered
-  }).eq('id', 1);
+      // 1. Mark question as answered in the database
+      await supabase.from('questions').update({
+        is_answered: true
+      }).eq('id', activeQuestion.id);
 
-  // 2. Directly update the specific question in the 'questions' table to trigger cast screen real-time listeners
-  await supabase.from('questions').update({
-    is_answered: true
-  }).eq('id', activeQuestion.id);
+      // 2. Clear active question in game_state
+      await supabase.from('game_state').update({
+        active_question_id: null,
+        question_revealed: false,
+        is_question_visible: false,
+        answer_revealed: false,
+        mode: 'buzzer',
+        answered_questions: updatedAnswered
+      }).eq('id', 1);
 
-  setAnsweredQuestions(updatedAnswered);
-  setActiveQuestion(null); 
-}}
+      // 3. Broadcast clear event and updated answered state to the cast screen
+      try {
+        await supabase.channel('cast_categories_sync').send({
+          type: 'broadcast',
+          event: 'clear_active_question',
+          payload: { 
+            questionId: activeQuestion.id,
+            answeredQuestions: updatedAnswered 
+          }
+        });
+      } catch (e) {
+        console.log('Clear broadcast failed:', e);
+      }
+
+      setAnsweredQuestions(updatedAnswered);
+      setActiveQuestion(null); 
+    }}
     className="px-4 bg-slate-800 hover:bg-slate-700 text-slate-300 py-3.5 rounded-xl text-sm font-medium transition-colors"
   >
     Cancel
   </button>
 )}
 
-  <button 
-    onClick={() => handleScoreAdjustment(true)} 
-    className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white py-3.5 rounded-xl"
-  >
-    Correct
-  </button>
-</div>
-              </div>
-            )}
+              <button 
+                onClick={() => handleScoreAdjustment(true)} 
+                className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white py-3.5 rounded-xl font-bold"
+              >
+                Correct
+              </button>
+            </div>
           </div>
         </div>
       )}
