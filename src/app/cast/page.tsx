@@ -401,16 +401,6 @@ export default function CastPage() {
 
   return (
     <main className="min-h-screen bg-[#0b0f19] text-white p-6 flex flex-col justify-between select-none relative">
-      {isElectron && (
-        <button
-          onClick={handleMoveToExternalDisplay}
-          className="absolute top-6 right-6 z-50 bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 hover:text-white text-xs font-medium px-3 py-1.5 rounded-lg border border-zinc-700 backdrop-blur-sm shadow-lg transition-all"
-          title="Move this window to an external monitor or projector"
-        >
-          🖥️ Move to External Display
-        </button>
-      )}
-
       <header className="flex justify-between items-center border-b border-slate-800 pb-4 mb-6">
         <div className="flex items-center space-x-3">
           <div className="bg-amber-500 text-black font-black px-3 py-1.5 rounded-lg text-xl">M</div>
