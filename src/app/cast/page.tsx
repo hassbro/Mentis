@@ -5,7 +5,7 @@ import { supabase } from '@/lib/supabase';
 export default function CastPage() {
   const [gameState, setGameState] = useState<any | null>(null);
   const [teams, setTeams] = useState<any[]>([]);
-  const [gameMode, setGameMode] = useState<'buzzer' | 'turn'>('buzzer');
+  const [gameMode, setGameMode] = useState<'buzzer' | 'turn' | 'unknown'>('unknown');
   const [categories, setCategories] = useState<any[]>([]);
   const [questionsMap, setQuestionsMap] = useState<{ [catId: number]: { [points: number]: any } }>({});
   const [activeQuestion, setActiveQuestion] = useState<any | null>(null);
@@ -13,14 +13,16 @@ export default function CastPage() {
   const [originUrl, setOriginUrl] = useState('');
   const [showQR, setShowQR] = useState(true);
   const [currentTurnTeamId, setCurrentTurnTeamId] = useState<number | null>(null);
-  const currentTeam = teams.find((t: any) => t.id === currentTurnTeamId);
-  const currentTurnName = currentTeam ? currentTeam.name : null;
+  const [currentTurnName, setCurrentTurnName] = useState<string | null>(null);
   const [isElectron, setIsElectron] = useState(false);
-  
+  const [clearedQuestionId, setClearedQuestionId] = useState<number | null>(null);
+
   const [showWinnerModal, setShowWinnerModal] = useState(false);
   const [isFinalActive, setIsFinalActive] = useState(false);
   const [gameWinner, setGameWinner] = useState<any | null>(null);
   const [gameEnded, setGameEnded] = useState(false);
+  const [buzzerCountdown, setBuzzerCountdown] = useState<number | null>(null);
+  const buzzerCountdownTimerRef = useRef<number | null>(null);
 
   const isMountedRef = useRef(true);
 
@@ -50,18 +52,36 @@ export default function CastPage() {
     }
     
     async function init() {
+      // Fetch teams first to ensure team lookup works
+      await fetchTeams();
+      
       const { data: gs } = await supabase.from('game_state').select('*').maybeSingle();
+      console.log('CAST: Initial game_state:', gs);
       if (!isMountedRef.current) return;
       if (gs) {
         setGameState(gs);
-        if (gs.game_mode) setGameMode(gs.game_mode);
-        if (gs.current_turn_team_id !== undefined) setCurrentTurnTeamId(gs.current_turn_team_id);
+        if (gs.mode) {
+          setGameMode(gs.mode);
+        } else if (gs.game_mode) {
+          setGameMode(gs.game_mode);
+        }
+        
+        if (gs.current_turn_team_id) {
+          setCurrentTurnTeamId(gs.current_turn_team_id);
+          const { data: t } = await supabase.from('teams').select('name').eq('id', gs.current_turn_team_id).maybeSingle();
+          if (t) setCurrentTurnName(t.name);
+        } else {
+          setCurrentTurnTeamId(null);
+          setCurrentTurnName(null);
+        }
 
         if (gs.active_question_id) {
+        if (gs.active_question_id !== clearedQuestionId) {
           loadActiveQuestion(gs.active_question_id);
-        } else {
-          setActiveQuestion(null); 
         }
+      } else {
+        setActiveQuestion(null);
+      }
         if (gs.show_winner || gs.winner_revealed || gs.game_over || gs.scores_calculated || gs.winner_screen) {
           setShowWinnerModal(true);
         }
@@ -69,7 +89,6 @@ export default function CastPage() {
           setIsFinalActive(true);
         }
       }
-      fetchTeams();
     }
 
     init();
@@ -87,7 +106,12 @@ export default function CastPage() {
 
     channel.on('broadcast', { event: 'clear_active_question' }, () => {
       if (isMountedRef.current) {
+        const qIdToClear = activeQuestion?.id || gameState?.active_question_id;
+        if (qIdToClear) {
+          setClearedQuestionId(qIdToClear);
+        }
         setActiveQuestion(null);
+        setGameState((prev: any) => prev ? { ...prev, active_question_id: null, is_question_visible: false, question_revealed: false } : null);
       }
     });
 
@@ -150,6 +174,7 @@ export default function CastPage() {
         setIsFinalActive(false);
         setActiveQuestion(null);
         setGameWinner(null);
+        setClearedQuestionId(null);
       }
     });
 
@@ -185,14 +210,37 @@ export default function CastPage() {
       const gs = payload.new;
       setGameState(gs);
       
+      if (gs.mode) {
+        setGameMode(gs.mode);
+      } else if (gs.game_mode) {
+        setGameMode(gs.game_mode);
+      }
+      
+      if (gs.current_turn_team_id !== undefined) {
+        setCurrentTurnTeamId(gs.current_turn_team_id);
+        const { data: t } = await supabase.from('teams').select('name').eq('id', gs.current_turn_team_id).maybeSingle();
+        if (t) {
+          setCurrentTurnName(t.name);
+        }
+      }
+      
       if (gs.show_winner || gs.winner_revealed || gs.game_over || gs.scores_calculated || gs.winner_screen) {
         setShowWinnerModal(true);
       }
       if (gs.final_round || gs.is_final_round || gs.final_started || gs.round === 'final') {
         setIsFinalActive(true);
       }
+      if (gs.buzzer_countdown_expires_at) {
+        startBuzzerCountdown(gs.buzzer_countdown_expires_at);
+      } else {
+        setBuzzerCountdown(null);
+        if (buzzerCountdownTimerRef.current) { window.clearInterval(buzzerCountdownTimerRef.current); buzzerCountdownTimerRef.current = null; }
+      }
+      
       if (gs.active_question_id) {
-        loadActiveQuestion(gs.active_question_id);
+        if (gs.active_question_id !== clearedQuestionId) {
+          loadActiveQuestion(gs.active_question_id);
+        }
       } else {
         setActiveQuestion(null);
       }
@@ -202,7 +250,6 @@ export default function CastPage() {
     bzCh.on('postgres_changes', { event: '*', schema: 'public', table: 'buzzers' }, async (payload: any) => {
       const b = payload.new;
       if (!b || !isMountedRef.current) return;
-      if (b.game_mode) setGameMode(b.game_mode);
       if (b.current_turn_team_id !== undefined) setCurrentTurnTeamId(b.current_turn_team_id);
 
       if (b.winner_team_id) {
@@ -214,14 +261,39 @@ export default function CastPage() {
     }).subscribe();
 
     const teamCh = supabase.channel(`cast_teams_${Date.now()}`);
-    teamCh.on('postgres_changes', { event: '*', schema: 'public', table: 'teams' }, () => {
-      fetchTeams();
+    teamCh.on('postgres_changes', { event: '*', schema: 'public', table: 'teams' }, async () => {
+      await fetchTeams();
+      const { data: gs } = await supabase.from('game_state').select('current_turn_team_id').maybeSingle();
+      if (gs && gs.current_turn_team_id !== undefined) {
+        setCurrentTurnTeamId(gs.current_turn_team_id);
+      }
     }).subscribe();
 
     const pollInterval = setInterval(async () => {
       const { data: gs } = await supabase.from('game_state').select('*').maybeSingle();
       if (gs && isMountedRef.current) {
         setGameState(gs);
+        
+        if (gs.mode) setGameMode(gs.mode);
+        if (gs.current_turn_team_id !== undefined) {
+          setCurrentTurnTeamId(gs.current_turn_team_id);
+          const { data: t } = await supabase.from('teams').select('name').eq('id', gs.current_turn_team_id).maybeSingle();
+          if (t) {
+            setCurrentTurnName(t.name);
+          }
+        }
+        
+        if (!gs.active_question_id) {
+          setActiveQuestion(null);
+        }
+        
+        if (gs.buzzer_countdown_expires_at) {
+          startBuzzerCountdown(gs.buzzer_countdown_expires_at);
+        } else {
+          setBuzzerCountdown(null);
+          if (buzzerCountdownTimerRef.current) { window.clearInterval(buzzerCountdownTimerRef.current); buzzerCountdownTimerRef.current = null; }
+        }
+        
         if (gs.show_winner || gs.winner_revealed || gs.game_over || gs.scores_calculated || gs.winner_screen) {
           setShowWinnerModal(true);
         }
@@ -229,7 +301,7 @@ export default function CastPage() {
           setIsFinalActive(true);
         }
       }
-    }, 2000);
+    }, 1000);
 
     return () => {
       isMountedRef.current = false;
@@ -248,22 +320,61 @@ export default function CastPage() {
   }
 
   async function loadActiveQuestion(qId: number) {
+    if (!qId || qId === clearedQuestionId) {
+      setActiveQuestion(null);
+      return;
+    }
     const { data } = await supabase.from('questions').select('*').eq('id', qId).maybeSingle();
-    if (data && isMountedRef.current) setActiveQuestion(data);
+    if (data && isMountedRef.current) {
+      setActiveQuestion(data);
+    }
   }
 
-  // Handler for manual external display button
+  function startBuzzerCountdown(expiresAtIso: string) {
+    const end = new Date(expiresAtIso).getTime();
+    if (buzzerCountdownTimerRef.current) {
+      window.clearInterval(buzzerCountdownTimerRef.current);
+      buzzerCountdownTimerRef.current = null;
+    }
+    const tick = () => {
+      const now = Date.now();
+      const remaining = Math.max(0, Math.ceil((end - now) / 1000));
+      setBuzzerCountdown(remaining);
+      if (remaining <= 0 && buzzerCountdownTimerRef.current) {
+        window.clearInterval(buzzerCountdownTimerRef.current);
+        buzzerCountdownTimerRef.current = null;
+      }
+    };
+    tick();
+    buzzerCountdownTimerRef.current = window.setInterval(tick, 250);
+  }
+
   const handleMoveToExternalDisplay = () => {
     const electron = (window as any).electronAPI;
     if (electron && electron.moveToExternalDisplay) {
-      console.log('CAST: Manually triggering move to external display');
       electron.moveToExternalDisplay();
     }
   };
 
   const isGameStarted = categories.length > 0 && !showQR;
-  const hasActiveQuestion = Boolean(gameState?.active_question_id && activeQuestion);
-  const isQuestionVisible = (gameState?.is_question_visible === true || gameState?.question_revealed === true) && hasActiveQuestion && (gameState.active_question_id === activeQuestion.id);
+
+  // True only if there is an active question ID AND it is different from the one that was just cleared
+  const isNewQuestionSelected = Boolean(gameState?.active_question_id && gameState.active_question_id !== clearedQuestionId);
+
+  // If a new question ID comes in that differs from the cleared one, reset the clearance lock
+  useEffect(() => {
+    if (gameState?.active_question_id && gameState.active_question_id !== clearedQuestionId) {
+      setClearedQuestionId(null);
+    }
+  }, [gameState?.active_question_id, clearedQuestionId]);
+
+  const hasActiveQuestion = Boolean(isNewQuestionSelected && activeQuestion && (gameState.active_question_id === activeQuestion.id));
+  
+  const isQuestionVisible = Boolean(
+    isNewQuestionSelected &&
+    (gameState?.is_question_visible === true || gameState?.question_revealed === true) &&
+    hasActiveQuestion
+  );
 
   const isFinalClueRevealed = isFinalActive && isQuestionVisible;
 
@@ -290,7 +401,6 @@ export default function CastPage() {
 
   return (
     <main className="min-h-screen bg-[#0b0f19] text-white p-6 flex flex-col justify-between select-none relative">
-      {/* Manual External Display Button (Only shows if running in Electron) */}
       {isElectron && (
         <button
           onClick={handleMoveToExternalDisplay}
@@ -301,13 +411,17 @@ export default function CastPage() {
         </button>
       )}
 
-      {/* Top Header */}
       <header className="flex justify-between items-center border-b border-slate-800 pb-4 mb-6">
         <div className="flex items-center space-x-3">
           <div className="bg-amber-500 text-black font-black px-3 py-1.5 rounded-lg text-xl">M</div>
           <h1 className="text-xl font-black tracking-wider">MENTIS <span className="text-slate-400 font-normal text-sm">TRIVIA & INTELLECT</span></h1>
         </div>
         <div className="flex items-center gap-4">
+          {buzzerCountdown !== null && buzzerCountdown > 0 && (
+            <div className="bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 font-mono font-extrabold px-4 py-1.5 rounded-full text-sm animate-pulse flex items-center gap-1.5">
+              <span>⏱️</span> {buzzerCountdown}s
+            </div>
+          )}
           {finalCountdown !== null && finalCountdown > 0 && (
             <div className="bg-amber-500/10 border border-amber-500/30 text-amber-400 font-mono font-extrabold px-4 py-1.5 rounded-full text-sm animate-pulse flex items-center gap-1.5">
               <span>⏱️</span> {finalCountdown}s
@@ -318,13 +432,24 @@ export default function CastPage() {
               <span>⏳</span> {currentTimer}s
             </div>
           )}
+          {isElectron && (
+            <button 
+              onClick={() => {
+                if ((window as any).electronAPI?.moveToExternalDisplay) {
+                  (window as any).electronAPI.moveToExternalDisplay();
+                }
+              }}
+              className="text-xs uppercase font-bold bg-sky-500/10 text-sky-400 px-4 py-1.5 rounded-full border border-sky-500/20 hover:bg-sky-500/20 transition-colors"
+            >
+              🖥️ Move to External Display
+            </button>
+          )}
           <div className="text-xs uppercase font-bold bg-amber-500/10 text-amber-400 px-4 py-1.5 rounded-full border border-amber-500/20">
             {isWinnerScreenActive ? 'Grand Champion' : isFinalActive ? 'Final Mentis' : boardPoints.includes(2000) ? 'Double Mentis' : isGameStarted ? 'Live Game Board' : 'Lobby'}
           </div>
         </div>
       </header>
 
-      {/* Main Content Layout */}
       <div className="flex-1 grid grid-cols-12 gap-6 items-center">
         <div className="col-span-12 lg:col-span-9 flex items-center justify-center">
           {showQR ? (
@@ -443,7 +568,6 @@ export default function CastPage() {
           )}
         </div>
 
-        {/* Right Sidebar */}
         <aside className="col-span-12 lg:col-span-3 flex flex-col space-y-4">
           <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-4 flex flex-col h-[420px]">
             <div className="flex justify-between items-center mb-3 pb-2 border-b border-slate-800">
@@ -468,18 +592,25 @@ export default function CastPage() {
           </div>
 
           <div className="bg-[#0d1117] border border-[#21262d] rounded-xl p-4 text-center shadow-lg">
-            {gameMode === 'turn' ? (
+            {gameMode === 'unknown' ? (
+              <>
+                <div className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">Loading...</div>
+                <div className="font-black text-slate-300 mt-1.5 text-sm tracking-wide">
+                  WAITING FOR GAME STATE
+                </div>
+              </>
+            ) : gameMode === 'turn' ? (
               <>
                 <div className="text-[10px] uppercase tracking-wider text-sky-400 font-bold">Current Turn</div>
                 <div className="font-black text-white mt-1.5 text-sm tracking-wide">
-                  {currentTurnName ? currentTurnName.toUpperCase() : 'WAITING FOR TURN'}
+                  {currentTurnName || 'WAITING FOR TURN'}
                 </div>
               </>
             ) : (
               <>
                 <div className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">First Buzzed Team</div>
                 <div className="font-black text-amber-400 mt-1.5 text-sm tracking-wide">
-                  {buzzerWinnerName ? `${buzzerWinnerName.toUpperCase()} BUZZED FIRST!` : 'NO BUZZES YET'}
+                  {buzzerWinnerName ? `${buzzerWinnerName} BUZZED FIRST!` : 'NO BUZZES YET'}
                 </div>
               </>
             )}
@@ -487,7 +618,6 @@ export default function CastPage() {
         </aside>
       </div>
 
-      {/* Grand Champion Winner Modal Overlay */}
       {isWinnerScreenActive && displayWinner && (
         <div className="fixed inset-0 bg-slate-950/95 backdrop-blur-lg flex items-center justify-center p-4 z-[99999]">
           <div className="bg-[#161b22] border-2 border-amber-500/50 max-w-xl w-full p-8 rounded-3xl shadow-2xl text-center space-y-6 animate-fade-in">

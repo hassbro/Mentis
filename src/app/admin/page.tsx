@@ -294,6 +294,7 @@ export default function AdminPage() {
 
       // 👉 2. Broadcast gameMode: 'turn' from the admin panel so the Cast screen switches instantly
       try {
+        console.log('ADMIN: Broadcasting turn update with team ID:', chosen);
         await supabase.channel('cast_categories_sync').send({
           type: 'broadcast',
           event: 'game_mode_turn_update',

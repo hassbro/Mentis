@@ -101,7 +101,9 @@ function GameContent() {
   const [revealEnabled, setRevealEnabled] = useState(false);
   const [isQuestionVisible, setIsQuestionVisible] = useState(false);
   const [countdown, setCountdown] = useState<number | null>(null); // seconds remaining
+  const [buzzerCountdown, setBuzzerCountdown] = useState<number | null>(null); // buzzer countdown
   const countdownTimerRef = useRef<number | null>(null);
+  const buzzerCountdownTimerRef = useRef<number | null>(null);
   const [chosenCorrectTeamIds, setChosenCorrectTeamIds] = useState<number[]>([]);
   const [showFinalModal, setShowFinalModal] = useState(false);
   const [showFinalQuestionAlert, setShowFinalQuestionAlert] = useState(false);
@@ -214,6 +216,12 @@ function GameContent() {
             const winnerName = t?.name ?? null;
             setBuzzerWinnerName(winnerName);
 
+            // This line writes the 15-second expiration to Supabase
+            const expiresAt = new Date(Date.now() + 15000).toISOString();
+            await supabase.from('game_state').update({ 
+              buzzer_countdown_expires_at: expiresAt 
+            }).eq('id', 1);
+
             try {
               await supabase.channel('cast_categories_sync').send({
                 type: 'broadcast',
@@ -225,6 +233,11 @@ function GameContent() {
             }
           } else {
             setBuzzerWinnerName(null);
+
+            // Clear countdown when buzzer is reset
+            await supabase.from('game_state').update({ 
+              buzzer_countdown_expires_at: null 
+            }).eq('id', 1);
 
             try {
               await supabase.channel('cast_categories_sync').send({
@@ -262,6 +275,10 @@ function GameContent() {
         if (data.final_countdown_expires_at) {
           startLocalCountdown(data.final_countdown_expires_at);
         }
+        
+        if (data.buzzer_countdown_expires_at) {
+          startBuzzerCountdown(data.buzzer_countdown_expires_at);
+        }
       }
     })();
 
@@ -286,6 +303,13 @@ function GameContent() {
       } else {
         setCountdown(null);
         if (countdownTimerRef.current) { window.clearInterval(countdownTimerRef.current); countdownTimerRef.current = null; }
+      }
+      
+      if (gs.buzzer_countdown_expires_at) {
+        startBuzzerCountdown(gs.buzzer_countdown_expires_at);
+      } else {
+        setBuzzerCountdown(null);
+        if (buzzerCountdownTimerRef.current) { window.clearInterval(buzzerCountdownTimerRef.current); buzzerCountdownTimerRef.current = null; }
       }
 
       setShowAnswer(!!gs.answer_revealed);
@@ -636,6 +660,28 @@ if (!finalQ) {
     countdownTimerRef.current = window.setInterval(tick, 250);
   }
 
+  function startBuzzerCountdown(expiresAtIso: string) {
+    const end = new Date(expiresAtIso).getTime();
+    console.log('START COUNTDOWN:', { expiresAtIso, end, now: Date.now() }); // 👉 Add this
+
+    if (buzzerCountdownTimerRef.current) {
+      window.clearInterval(buzzerCountdownTimerRef.current);
+      buzzerCountdownTimerRef.current = null;
+    }
+    const tick = () => {
+      const now = Date.now();
+      const remaining = Math.max(0, Math.ceil((end - now) / 1000));
+      console.log('COUNTDOWN TICK:', { remaining, end, now }); // 👉 Add this
+      setBuzzerCountdown(remaining);
+      if (remaining <= 0 && buzzerCountdownTimerRef.current) {
+        window.clearInterval(buzzerCountdownTimerRef.current);
+        buzzerCountdownTimerRef.current = null;
+      }
+    };
+    tick();
+    buzzerCountdownTimerRef.current = window.setInterval(tick, 250);
+  }
+
   async function revealFinalAnswer() {
     await supabase.from('game_state').update({ answer_revealed: true }).eq('id', 1);
     setShowAnswer(true);
@@ -744,11 +790,14 @@ if (!finalQ) {
       }).eq('id', 1);
       
       // Broadcast game mode update to cast and buzzer clients
-      await supabase.channel('cast_categories_sync').send({
-        type: 'broadcast',
-        event: 'game_mode_turn_update',
-        payload: { gameMode, currentTurnTeamId: gameMode === 'turn' ? currentTurnTeamId : null }
-      });
+      console.log('HOST: Broadcasting game_mode_turn_update with gameMode:', gameMode, 'currentTurnTeamId:', currentTurnTeamId);
+      // Don't broadcast on question click - let the real-time database updates handle it
+      // The game_state update above will trigger real-time updates on all clients
+      // await supabase.channel('cast_categories_sync').send({
+      //   type: 'broadcast',
+      //   event: 'game_mode_turn_update',
+      //   payload: { gameMode, currentTurnTeamId: gameMode === 'turn' ? currentTurnTeamId : null }
+      // });
       
       // Open buzzer ONLY if in buzzer mode (after a brief delay to ensure state sync)
       if (gameMode === 'buzzer') {
@@ -1122,6 +1171,16 @@ const currentTurnName = currentTeam ? currentTeam.name : null;
       <div className="max-w-[1400px] mx-auto w-full mb-6 pb-4 border-b border-[#2f3748] flex items-center justify-between">
         <MentisLogo isDJ={isDJ} isFinal={isFinal} />
         <div className="flex items-center gap-3">
+          {buzzerCountdown !== null && buzzerCountdown > 0 && (
+            <div className="bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 font-mono font-extrabold px-4 py-1.5 rounded-full text-sm animate-pulse flex items-center gap-1.5">
+              <span>⏱️</span> {buzzerCountdown}s
+            </div>
+          )}
+          {countdown !== null && countdown > 0 && (
+            <div className="bg-red-500/10 border border-red-500/30 text-red-400 font-mono font-extrabold px-4 py-1.5 rounded-full text-sm animate-pulse flex items-center gap-1.5">
+              <span>⏳</span> {countdown}s
+            </div>
+          )}
           <button onClick={() => fetchGameData(round as any)} className="bg-[#222733] px-4 py-2 rounded-xl text-xs">Refresh Board</button>
           <a href="/admin" className="bg-[#222733] px-4 py-2 rounded-xl text-xs">Admin Dashboard</a>
         </div>
@@ -1219,14 +1278,14 @@ const currentTurnName = currentTeam ? currentTeam.name : null;
                 <>
                   <div className="text-[10px] uppercase text-sky-400 font-semibold">Current Turn</div>
                   <div className="font-black text-white mt-1">
-                    {currentTurnName ? currentTurnName.toUpperCase() : 'WAITING FOR TURN'}
+                    {currentTurnName || 'WAITING FOR TURN'}
                   </div>
                 </>
               ) : (
                 <>
                   <div className="text-[10px] uppercase text-slate-400">First Buzzed Team</div>
                   <div className="font-black text-amber-400 mt-1">
-                    {buzzerWinnerName ? buzzerWinnerName.toUpperCase() : 'NO BUZZES YET'}
+                    {buzzerWinnerName || 'NO BUZZES YET'}
                   </div>
                 </>
               )}
@@ -1254,9 +1313,20 @@ const currentTurnName = currentTeam ? currentTeam.name : null;
       {activeQuestion && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4 z-50">
           <div className="bg-[#222733] border-2 border-amber-400/20 max-w-2xl w-full p-8 rounded-3xl shadow-2xl text-center space-y-6">
-            <div className="text-xs text-slate-400 uppercase tracking-widest">
-              <span>{activeQuestion.points} Points</span>
+            
+            {/* Single header row with points and timer */}
+            <div className="flex items-center justify-between">
+              <div className="text-xs text-slate-400 uppercase tracking-widest">
+                <span>{activeQuestion.points} Points</span>
+              </div>
+
+              {buzzerCountdown !== null && buzzerCountdown > 0 && (
+                <div className="bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 font-mono font-extrabold px-3 py-1 rounded-full text-xs animate-pulse flex items-center gap-1">
+                  <span>⏱️</span> {buzzerCountdown}s
+                </div>
+              )}
             </div>
+
             <h2 className="text-2xl sm:text-3xl font-bold text-slate-100">{activeQuestion.clue}</h2>
 
             {showAnswer ? (
@@ -1295,25 +1365,36 @@ const currentTurnName = currentTeam ? currentTeam.name : null;
       }).eq('id', activeQuestion.id);
 
       // 2. Clear active question in game_state and close buzzer
-      await supabase.from('game_state').update({
-        active_question_id: null,
-        question_revealed: false,
-        is_question_visible: false,
-        answer_revealed: false,
-        mode: 'buzzer',
-        answered_questions: updatedAnswered
-      }).eq('id', 1);
+await supabase.from('game_state').update({
+  active_question_id: null,
+  question_revealed: false,
+  is_question_visible: false,
+  answer_revealed: false,
+  mode: 'buzzer',
+  answered_questions: updatedAnswered,
+  buzzer_countdown_expires_at: null
+} as any).eq('id', 1);
       
       // 3. Close buzzer
       await supabase.from('buzzers').update({ active: false, winner_team_id: null }).eq('id', 1);
 
-      // 4. Broadcast clear event and updated answered state to the cast screen
+     // 3. Update the database game_state safely targeting row 1
+      await supabase
+        .from('game_state')
+        .update({
+          active_question_id: null,
+          is_question_visible: false,
+          question_revealed: false
+        })
+        .eq('id', 1);
+
+      // 4. Broadcast clear event to the cast screen
       try {
         await supabase.channel('cast_categories_sync').send({
           type: 'broadcast',
           event: 'clear_active_question',
           payload: { 
-            questionId: activeQuestion.id,
+            questionId: activeQuestion?.id,
             answeredQuestions: updatedAnswered 
           }
         });
