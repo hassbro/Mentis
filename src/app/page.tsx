@@ -1329,6 +1329,26 @@ const currentTurnName = currentTeam ? currentTeam.name : null;
 
             <h2 className="text-2xl sm:text-3xl font-bold text-slate-100">{activeQuestion.clue}</h2>
 
+            {gameMode === 'turn' ? (
+  <div className="mx-auto max-w-md rounded-2xl border border-sky-400/30 bg-sky-400/10 px-5 py-3">
+    <div className="text-[10px] font-bold uppercase tracking-widest text-sky-300">
+      Current Turn
+    </div>
+    <div className="mt-1 text-lg font-black text-sky-100">
+      {teams.find((team: any) => String(team.id) === String(currentTurnTeamId))?.name || 'Waiting for turn'}
+    </div>
+  </div>
+) : gameMode === 'buzzer' ? (
+  <div className="mx-auto max-w-md rounded-2xl border border-rose-400/30 bg-rose-400/10 px-5 py-3">
+    <div className="text-[10px] font-bold uppercase tracking-widest text-rose-300">
+      First to Buzz
+    </div>
+    <div className="mt-1 text-lg font-black text-rose-100">
+      {buzzerWinnerName || 'Waiting for a buzz'}
+    </div>
+  </div>
+) : null}
+
             {showAnswer ? (
               <div className="bg-[#1b202a] border border-[#293244] p-4 rounded-2xl">
                 <div className="text-xs text-slate-400 uppercase">Correct Answer:</div>

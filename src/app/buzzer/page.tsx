@@ -472,14 +472,32 @@ export default function BuzzerPage() {
   }
 
   async function handleBuzz() {
-    if (!teamId || !buzzerActive || hasBuzzed) return;
-    
-    setHasBuzzed(true);
-    const currentTeamName = teamName;
-    setBuzzerWinner(currentTeamName);
-    setBuzzerWinnerName(currentTeamName);
-    await supabase.from('buzzers').update({ active: false, winner_team_id: teamId }).eq('id', 1);
+  if (!teamId || !buzzerActive || hasBuzzed) return;
+
+  setHasBuzzed(true);
+
+  const { data, error } = await supabase
+    .from('buzzers')
+    .update({ active: false, winner_team_id: teamId })
+    .eq('id', 1)
+    .eq('active', true)
+    .select('winner_team_id')
+    .maybeSingle();
+
+  if (error) {
+    console.error('Failed to submit buzz:', error);
+    setHasBuzzed(false);
+    return;
   }
+
+  if (!data) {
+    // Another team claimed the buzzer first; realtime will show the winner.
+    return;
+  }
+
+  setBuzzerWinner(teamName);
+  setBuzzerWinnerName(teamName);
+}
 
   const effectiveMode = rawMode === 'buzzer' ? 'buzzer' : (rawMode === 'turn' ? 'turn' : (rawMode === 'daily_double' ? 'daily_double' : (finalStarted ? 'final' : 'buzzer')));
 
